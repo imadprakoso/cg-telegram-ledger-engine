@@ -81,6 +81,32 @@ document.querySelectorAll('.tab-pill').forEach((btn) => {
 
 render();
 
+function extractTelegramText(textElement) {
+  if (!textElement) return "";
+
+  let html = textElement.innerHTML || "";
+
+  html = html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = html;
+  let text = textarea.value;
+
+  text = text
+    .replace(/\u00a0/g, " ")
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return text;
+}
+
 async function handleFileChange(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -123,7 +149,7 @@ function parseTelegramHtml(html) {
     const senderEl = body?.querySelector(':scope > .from_name') || node.querySelector('.from_name');
     const sender = cleanText(senderEl?.childNodes?.[0]?.textContent || senderEl?.textContent || '');
     const textEls = Array.from(node.querySelectorAll('.text'));
-    const text = textEls.map((el) => normalizeTelegramText(el.innerText || el.textContent || '')).filter(Boolean).join('\n');
+    const text = textEls.map((el) => extractTelegramText(el)).filter(Boolean).join('\n');
     const photoLinks = Array.from(node.querySelectorAll('a.photo_wrap[href]')).map((a) => a.getAttribute('href')).filter(Boolean);
     const timestamp = parseTelegramTimestamp(dateTitle, currentServiceDate, timeText);
     const messageDate = timestamp.dateLabel || currentServiceDate || '';
@@ -152,11 +178,20 @@ function parseTelegramHtml(html) {
   state.finalLists = pickFinalLists(state.listHistory);
   state.transactions = buildFinalTransactions(state.finalLists, state.photoIndex);
   hydrateFilters();
+
+  console.log({
+    totalMessages: rawMessages.length,
+    listMessagesCount: state.listHistory.length,
+    finalListsCount: state.finalLists.length,
+    firstListTextSample: state.listHistory[0] ? state.listHistory[0].text.substring(0, 100) : null,
+    parsedTransactionsCount: state.transactions.length,
+    firstParsedTransaction: state.transactions[0]
+  });
 }
 
 function detectMessageType(text, photos) {
   const lower = (text || '').toLowerCase();
-  if (/list\s*tf\s*cg/i.test(text)) return 'List TF';
+  if (/(list\s*tf\s*cg|list\s*tf|tf\s*cg)/i.test(text)) return 'List TF';
   if (photos?.length && /(cg[a-z0-9]{6,}|ot\d{8}cg[a-z0-9]+)/i.test(text)) return 'Bukti Foto / Request';
   if (/(ke skip|minta inv|cash aja|ditalang|talang|refund|belum ngasih inv|blm ngasih inv)/i.test(text)) return 'Koreksi / Catatan';
   if (photos?.length) return 'Foto';
@@ -178,7 +213,7 @@ function buildPhotoIndex(messages) {
 
 function buildListHistory(messages) {
   return messages
-    .filter((msg) => /list\s*tf\s*cg/i.test(msg.text))
+    .filter((msg) => /(list\s*tf\s*cg|list\s*tf|tf\s*cg)/i.test(msg.text))
     .map((msg) => {
       const listDate = extractListDate(msg.text) || msg.dateKey;
       const dateKey = normalizeDateKey(listDate) || msg.dateKey || `unknown-${msg.index}`;
@@ -197,7 +232,15 @@ function pickFinalLists(listHistory) {
   listHistory.forEach((item) => {
     const key = item.listDateKey || item.dateKey || `unknown-${item.index}`;
     const current = byDate.get(key);
-    if (!current || item.timestampMs > current.timestampMs) byDate.set(key, item);
+    if (!current) {
+      byDate.set(key, item);
+    } else if (item.timestampMs > current.timestampMs) {
+      if (item.transactionBlocks.length === 0 && current.transactionBlocks.length > 0) {
+        current.isFallback = true;
+      } else {
+        byDate.set(key, item);
+      }
+    }
   });
 
   const finalIds = new Set(Array.from(byDate.values()).map((item) => item.id));
@@ -220,7 +263,7 @@ function buildFinalTransactions(finalLists, photoIndex) {
 
 function splitTransactionBlocks(text) {
   const lines = normalizeTelegramText(text).split('\n').map((line) => line.trim()).filter(Boolean);
-  const startIndex = lines.findIndex((line) => /list\s*tf\s*cg/i.test(line));
+  const startIndex = lines.findIndex((line) => /(list\s*tf\s*cg|list\s*tf|tf\s*cg)/i.test(line));
   const bodyLines = startIndex >= 0 ? lines.slice(startIndex + 1) : lines;
   const blocks = [];
   let current = [];
@@ -289,6 +332,7 @@ function parseTransactionBlock(blockLines, list, blockIndex) {
     linkFoto: [],
     sourceMessageId: list.id,
     teksMentah: rawBlock,
+    isFallback: list.isFallback || false,
   };
 }
 
@@ -359,6 +403,7 @@ function attachEvidenceAndValidation(tx, photoIndex) {
   if (tx.kategori === 'Perlu Dicek') notes.push('Kategori belum yakin');
   if (tx.statusNota === 'Kurang Nota') notes.push('Foto nota belum terhubung dari HTML');
   if (tx.statusInvoice === 'Kurang Invoice') notes.push('Invoice wajib untuk Outsourcing');
+  if (tx.isFallback) notes.push('Fallback: list terbaru gagal diparse, memakai list valid sebelumnya.');
 
   if (!tx.nominal) tx.statusValidasi = 'Nominal Perlu Dicek';
   else if (!tx.vendor || tx.vendor === 'Perlu Dicek') tx.statusValidasi = 'Vendor Perlu Dicek';
@@ -400,15 +445,15 @@ function parseNominal(text) {
 }
 
 function extractCgCodes(text) {
-  return unique((text.match(/\bCG[A-Z0-9]{6,}\b/gi) || []).map((code) => code.toUpperCase()));
+  return unique((text.match(/\bCG[A-Z0-9]+\b/gi) || []).map((code) => code.toUpperCase()));
 }
 
 function extractOtCodes(text) {
-  return unique((text.match(/\bOT\d{8}CG[A-Z0-9]+\b/gi) || []).map((code) => code.toUpperCase()));
+  return unique((text.match(/\bOT[0-9A-Z]+\b/gi) || []).map((code) => code.toUpperCase()));
 }
 
 function extractListDate(text) {
-  const match = text.match(/List\s*TF\s*CG\s*(\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4})/i);
+  const match = text.match(/(?:List\s*TF\s*CG|List\s*TF|TF\s*CG)\s*(\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4})/i);
   return match ? match[1] : '';
 }
 
