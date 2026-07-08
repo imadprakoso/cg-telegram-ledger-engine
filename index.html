@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cipta Grafika | Telegram Ledger Engine</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="app-frame">
+        <header class="topbar">
+          <div class="brand-wrap">
+            <div class="brand-mark">CG</div>
+            <div>
+              <p class="brand-eyebrow">Cipta Grafika</p>
+              <p class="brand-caption">Accounting converter</p>
+            </div>
+          </div>
+
+          <nav class="top-tabs" aria-label="Main navigation">
+            <button class="tab-pill active" data-tab="transaksi">Transaksi Final</button>
+            <button class="tab-pill" data-tab="riwayat">Riwayat List</button>
+            <button class="tab-pill" data-tab="mentah">Data Chat Mentah</button>
+            <button class="tab-pill" data-tab="keyword">Master Keyword</button>
+          </nav>
+
+          <button id="exportBtn" class="export-button" type="button" disabled>Export Excel Final</button>
+        </header>
+
+        <section class="hero-section">
+          <div>
+            <h1>Telegram Ledger Engine</h1>
+            <p>Otomatisasi parsing data transaksi dari export chat Telegram HTML menjadi Excel akuntansi yang rapi.</p>
+          </div>
+          <div class="hero-note">
+            <span class="note-dot"></span>
+            Ambil <strong>List TF CG terbaru</strong> per tanggal, lalu klasifikasi sesuai aturan accounting CG.
+          </div>
+        </section>
+
+        <section class="upload-card">
+          <div class="upload-copy">
+            <div class="icon-bubble">⇧</div>
+            <div>
+              <h2>Upload Data Source</h2>
+              <p>Pilih file <code>messages.html</code> dari hasil export Telegram Desktop. Semua proses berjalan di browser, data tidak dikirim ke server.</p>
+            </div>
+          </div>
+
+          <div class="upload-box">
+            <label for="fileInput" class="upload-button">Pilih messages.html</label>
+            <input id="fileInput" type="file" accept=".html,text/html" />
+            <div class="file-meta">
+              <strong id="fileName">Belum ada file</strong>
+              <span id="fileHint">Sistem otomatis memfilter List TF CG final per tanggal.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="summary-grid" aria-label="Ringkasan">
+          <article class="summary-card">
+            <span>Total Transaksi</span>
+            <strong id="statTransaksi">0</strong>
+          </article>
+          <article class="summary-card">
+            <span>Total Pengeluaran</span>
+            <strong id="statPengeluaran">Rp 0</strong>
+          </article>
+          <article class="summary-card warning-card">
+            <span>Perlu Dicek</span>
+            <strong id="statPerluDicek">0</strong>
+          </article>
+          <article class="summary-card">
+            <span>Riwayat List</span>
+            <strong id="statRiwayat">0</strong>
+          </article>
+        </section>
+
+        <section class="content-panel">
+          <div class="panel-header">
+            <div>
+              <p class="panel-kicker" id="panelKicker">Transaksi final</p>
+              <h2 id="panelTitle">Data transaksi final</h2>
+            </div>
+            <p id="panelInfo" class="panel-info">Upload file untuk mulai memproses data.</p>
+          </div>
+
+          <div class="filter-toolbar" id="transactionFilters">
+            <div class="search-wrap">
+              <span>⌕</span>
+              <input id="searchInput" type="search" placeholder="Cari vendor, rekening, barang, kode CG..." />
+            </div>
+            <select id="categoryFilter" aria-label="Filter kategori">
+              <option value="">Kategori (Semua)</option>
+            </select>
+            <select id="validationFilter" aria-label="Filter validasi">
+              <option value="">Validasi (Semua)</option>
+            </select>
+          </div>
+
+          <div id="tableHost" class="table-card"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
