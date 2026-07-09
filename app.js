@@ -72,11 +72,30 @@ const els = {
   statTidakMatch: document.getElementById('statTidakMatch'),
   statSelisihBersih: document.getElementById('statSelisihBersih'),
   mutationOcrProgress: document.getElementById('mutationOcrProgress'),
+  mutationFallbackActions: document.getElementById('mutationFallbackActions'),
+  btnOcrCloud: document.getElementById('btnOcrCloud'),
+  btnPasteManual: document.getElementById('btnPasteManual'),
+  manualPasteCard: document.getElementById('manualPasteCard'),
+  manualPasteInput: document.getElementById('manualPasteInput'),
+  btnParseManual: document.getElementById('btnParseManual'),
+  mutationInputLabel: document.getElementById('mutationInputLabel'),
 };
 
 els.fileInput.addEventListener('change', handleFileChange);
 if (els.mutationInput) {
   els.mutationInput.addEventListener('change', handleMutationChange);
+}
+if (els.btnOcrCloud) {
+  els.btnOcrCloud.addEventListener('click', handleOcrCloudClick);
+}
+if (els.btnPasteManual) {
+  els.btnPasteManual.addEventListener('click', () => {
+    els.manualPasteCard.style.display = 'block';
+    els.manualPasteInput.focus();
+  });
+}
+if (els.btnParseManual) {
+  els.btnParseManual.addEventListener('click', handleManualPasteParse);
 }
 els.exportBtn.addEventListener('click', exportWorkbook);
 els.searchInput.addEventListener('input', (e) => {
@@ -1032,6 +1051,12 @@ async function handleMutationChange(event) {
     els.mutationOcrProgress.style.display = 'none';
     els.mutationOcrProgress.textContent = '';
   }
+  if (els.mutationFallbackActions) {
+    els.mutationFallbackActions.style.display = 'none';
+  }
+  if (els.mutationInputLabel) {
+    els.mutationInputLabel.style.display = 'inline-block';
+  }
 
   try {
     const arrayBuffer = await file.arrayBuffer();
@@ -1039,9 +1064,8 @@ async function handleMutationChange(event) {
     const pdf = await loadingTask.promise;
     
     let fullText = '';
-    let readingMethod = 'PDF Text';
+    let readingMethod = 'pdf_text';
     
-    // Attempt digital text extraction
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
@@ -1052,31 +1076,66 @@ async function handleMutationChange(event) {
     const keywordCheck = /(MUTASI|DEBIT|KREDIT|SALDO|TRANSFER|BIAYA|TANGGAL|BCA|MANDIRI|BRI|DANA)/i.test(fullText);
 
     if (fullText.trim().length > 100 || keywordCheck) {
-      els.mutationFileHint.textContent = 'Teks PDF berhasil dibaca.';
+      els.mutationFileHint.textContent = 'PDF digital terbaca.';
+      await parseMutationText(fullText, readingMethod);
+      if (state.mutations.length > 0) {
+        reconcileTransactions();
+        render();
+      }
     } else {
-      els.mutationFileHint.textContent = 'PDF tidak memiliki teks, menjalankan OCR...';
-      readingMethod = 'OCR';
-      fullText = await runOcrOnPdf(pdf);
-      if (fullText.trim().length > 100 || /(MUTASI|DEBIT|KREDIT|SALDO|TRANSFER|BIAYA|TANGGAL|BCA|MANDIRI|BRI|DANA|\d{4,})/i.test(fullText)) {
-         els.mutationFileHint.textContent = 'OCR berhasil membaca PDF.';
-      } else {
-         els.mutationFileHint.textContent = 'OCR gagal membaca PDF. Silakan gunakan PDF digital atau upload mutasi yang lebih jelas.';
+      els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca.';
+      if (els.mutationFallbackActions) {
+        els.mutationFallbackActions.style.display = 'flex';
+      }
+      if (els.mutationInputLabel) {
+        els.mutationInputLabel.style.display = 'none';
       }
     }
-
-    await parseMutationText(fullText, readingMethod);
-    
-    if (state.mutations.length > 0) {
-      reconcileTransactions();
-      els.mutationFileHint.textContent = `${state.mutations.length} data mutasi ditemukan.`;
-    } else {
-      els.mutationFileHint.textContent = 'Tidak ada transaksi mutasi yang dapat diparse, cek tab Mutasi Bank untuk teks mentah.';
-    }
-    render();
   } catch (error) {
     console.error(error);
     els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca.';
+    if (els.mutationFallbackActions) {
+      els.mutationFallbackActions.style.display = 'flex';
+    }
+    if (els.mutationInputLabel) {
+      els.mutationInputLabel.style.display = 'none';
+    }
   }
+}
+
+async function handleOcrCloudClick() {
+  els.mutationFileHint.textContent = 'Mencoba OCR Cloud...';
+  const file = els.mutationInput.files?.[0];
+  if (!file) return;
+  
+  try {
+    await parseMutationWithCloudOcr(file);
+  } catch (error) {
+    els.mutationFileHint.textContent = 'OCR cloud belum aktif. Gunakan Paste Mutasi Manual atau upload PDF digital.';
+  }
+}
+
+async function handleManualPasteParse() {
+  const text = els.manualPasteInput.value;
+  if (!text.trim()) return;
+  
+  els.manualPasteCard.style.display = 'none';
+  els.mutationFileHint.textContent = 'Memproses teks mutasi manual...';
+  
+  await parseMutationText(text, 'manual_paste');
+  if (state.mutations.length > 0) {
+    els.mutationFileHint.textContent = `${state.mutations.length} data mutasi dari paste manual ditemukan.`;
+    reconcileTransactions();
+    render();
+  } else {
+    els.mutationFileHint.textContent = 'Gagal memparse mutasi dari teks manual.';
+  }
+}
+
+async function parseMutationWithCloudOcr(file) {
+  // Stub for OCR Cloud
+  // For MVP, we just throw an error because API Key is not configured
+  throw new Error("OCR cloud belum dikonfigurasi.");
 }
 
 async function runOcrOnPdf(pdf) {
@@ -1131,29 +1190,33 @@ async function parseMutationText(fullText, readingMethod) {
   let currentId = 1;
 
   for (const line of lines) {
-    const amountMatch = line.match(/(?:Rp\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)/);
+    const amountMatch = line.match(/(?:(?:Rp|IDR)\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,})/i);
     const dateMatch = line.match(/(\d{1,2}[\/\-\s.](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|\d{1,2})(?:[\/\-\s.]\d{2,4})?)/i);
     
     if (amountMatch) {
       const cleanAmountStr = amountMatch[1].replace(/[,.]00$/, '').replace(/[^0-9]/g, '');
       const amountVal = parseFloat(cleanAmountStr);
-      const isDebit = line.toLowerCase().includes('trf') || line.toLowerCase().includes('db') || line.toLowerCase().includes('keluar') || line.toLowerCase().includes('debit') || line.toLowerCase().includes('dr') || line.toLowerCase().includes('tarik');
-      const isKredit = line.toLowerCase().includes('cr') || line.toLowerCase().includes('kredit') || line.toLowerCase().includes('masuk') || line.toLowerCase().includes('setor');
+      const isDebit = /(db|debit|keluar|transfer|trsf|biaya|tarikan|payment|qris|e-banking|mbanking)/i.test(line);
+      const isKredit = /(cr|kredit|masuk|setor)/i.test(line);
 
-      // Simple heuristic: if we have a reasonable amount
+      let statusParse = 'Berhasil';
+      if (!isDebit && !isKredit) {
+        statusParse = 'Perlu Dicek';
+      }
+
       if (amountVal > 0) {
         parsedMutations.push({
           id: `mut-${readingMethod.toLowerCase().replace(/\s/g, '-')}-${currentId++}`,
           tanggal: dateMatch ? dateMatch[1] : '',
           keterangan: cleanText(line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '')),
           nominal: amountVal,
-          nominal_keluar: isDebit ? amountVal : (isKredit ? 0 : amountVal), // Default to debit
+          nominal_keluar: isDebit ? amountVal : (isKredit ? 0 : amountVal), // Default to debit if ambiguous
           nominal_masuk: isKredit ? amountVal : 0,
           saldo: 0,
-          no_rekening_tujuan: '', // Need complex regex to parse reliably
-          nama_penerima: '', // Need complex regex to parse reliably
+          no_rekening_tujuan: '',
+          nama_penerima: '',
           sumber_pembacaan: readingMethod,
-          status_parse: 'Berhasil',
+          status_parse: statusParse,
           raw_text: line,
           matched: false
         });

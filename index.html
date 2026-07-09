@@ -69,18 +69,39 @@
             <div>
               <h2>Upload PDF Mutasi Bank</h2>
               <p>Upload file PDF mutasi bank untuk rekonsiliasi nominal dengan transaksi Telegram.</p>
-              <p style="margin-top: 8px; font-size: 0.85rem; color: #666;">Jika PDF mutasi tidak bisa dibaca, kemungkinan PDF berupa scan/gambar. Sistem akan mencoba OCR otomatis.</p>
+              <p style="margin-top: 8px; font-size: 0.85rem; color: #666;">Jika PDF mutasi tidak bisa dibaca, kemungkinan PDF berupa scan/gambar. Sistem akan menyediakan opsi OCR Cloud atau Paste Manual.</p>
             </div>
           </div>
 
           <div class="upload-box">
-            <label for="mutationInput" class="upload-button">Pilih PDF Mutasi Bank</label>
+            <label for="mutationInput" class="upload-button" id="mutationInputLabel">Pilih PDF Mutasi Bank</label>
             <input id="mutationInput" type="file" accept=".pdf" hidden />
-            <div class="file-meta">
+            
+            <div id="mutationFallbackActions" style="display: none; margin-top: 12px; gap: 8px; flex-wrap: wrap;">
+               <button id="btnOcrCloud" class="upload-button" style="background: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Coba OCR Cloud</button>
+               <button id="btnPasteManual" class="upload-button" style="background: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Paste Mutasi Manual</button>
+               <label for="mutationInput" class="upload-button" style="background: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Upload File Lain</label>
+            </div>
+
+            <div class="file-meta" style="margin-top: 12px;">
               <strong id="mutationFileName">Belum ada PDF mutasi dipilih</strong>
               <span id="mutationFileHint">Menunggu PDF</span>
               <span id="mutationOcrProgress" style="display: none; color: var(--accent); font-weight: 500; font-size: 0.9rem; margin-top: 4px;"></span>
             </div>
+          </div>
+        </section>
+
+        <section class="upload-card" id="manualPasteCard" style="display: none;">
+          <div class="upload-copy">
+            <div class="icon-bubble">✍️</div>
+            <div>
+              <h2>Paste Mutasi Manual</h2>
+              <p>Paste teks mutasi dari internet banking, PDF, Excel, atau hasil OCR external ke sini.</p>
+            </div>
+          </div>
+          <div class="upload-box" style="align-items: stretch;">
+            <textarea id="manualPasteInput" rows="6" placeholder="Paste teks mutasi di sini..." style="width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 6px; resize: vertical; font-family: monospace; font-size: 13px;"></textarea>
+            <button id="btnParseManual" class="upload-button" style="margin-top: 12px; align-self: flex-start;">Parse Mutasi dari Teks</button>
           </div>
         </section>
 
