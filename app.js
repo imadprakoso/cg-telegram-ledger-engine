@@ -1,3 +1,6 @@
+import * as pdfjsLib from 'pdfjs-dist';
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+
 const state = {
   fileName: '',
   rawMessages: [],
@@ -1010,57 +1013,90 @@ async function handleMutationChange(event) {
   const file = event.target.files?.[0];
   if (!file) return;
 
-  state.mutationFileName = file.name;
-  els.mutationFileName.textContent = file.name;
-  els.mutationFileHint.textContent = 'Memproses file mutasi...';
-
-  try {
-    const text = await file.text();
-    parseMutationCsv(text);
-    reconcileTransactions();
-    els.mutationFileHint.textContent = `${state.mutations.length} data mutasi keluar ditemukan.`;
-    render();
-  } catch (error) {
-    console.error(error);
-    els.mutationFileHint.textContent = 'Gagal memproses file mutasi CSV.';
-  }
-}
-
-function parseMutationCsv(csvText) {
-  const lines = csvText.split('\n').filter(line => line.trim());
-  if (lines.length < 2) return;
-  
-  const headers = lines[0].toLowerCase().split(',').map(h => h.trim().replace(/["']/g, ''));
-  const dateIdx = headers.findIndex(h => h.includes('tanggal') || h.includes('date'));
-  const descIdx = headers.findIndex(h => h.includes('keterangan') || h.includes('desc'));
-  const debitIdx = headers.findIndex(h => h.includes('keluar') || h.includes('debit') || h.includes('tarik') || h.includes('amount'));
-  
-  if (debitIdx === -1) {
-    els.mutationFileHint.textContent = 'Kolom nominal (keluar/debit) tidak ditemukan di CSV.';
+  if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+    els.mutationFileHint.textContent = 'File mutasi harus dalam format PDF.';
     return;
   }
 
-  const parsedMutations = [];
-  
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',').map(c => c.trim().replace(/["']/g, ''));
-    if (cols.length < 2) continue;
+  state.mutationFileName = file.name;
+  els.mutationFileName.textContent = file.name;
+  els.mutationFileHint.textContent = 'Memproses file mutasi PDF...';
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    await parseMutationPdf(arrayBuffer);
     
-    const debitRaw = cols[debitIdx] || '0';
-    let debitVal = parseFloat(debitRaw.replace(/[^\d.-]/g, ''));
-    
-    // Asumsikan ini file mutasi khusus keluar, atau jika ada minus
-    if (isNaN(debitVal) || debitVal === 0) continue;
-    debitVal = Math.abs(debitVal); // Pastikan positif
-    
-    parsedMutations.push({
-      id: `mut-${i}`,
-      tanggal: dateIdx !== -1 ? cols[dateIdx] : '',
-      keterangan: descIdx !== -1 ? cols[descIdx] : '',
-      nominal: debitVal,
-      matched: false
-    });
+    if (state.mutations.length > 0) {
+      reconcileTransactions();
+      els.mutationFileHint.textContent = `${state.mutations.length} data mutasi keluar ditemukan.`;
+      render();
+    }
+  } catch (error) {
+    console.error(error);
+    els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca atau terjadi kesalahan.';
   }
+}
+
+async function parseMutationPdf(arrayBuffer) {
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  const pdf = await loadingTask.promise;
+  let fullText = '';
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map(item => item.str).join(' ');
+    fullText += pageText + '\n';
+  }
+
+  // Basic parsing logic to extract amounts and descriptions from the raw text
+  // Since PDF layouts vary wildly, we look for standard patterns: Dates and Currency amounts.
+  const parsedMutations = [];
+  const lines = fullText.split('\n').filter(line => line.trim());
+  
+  let currentId = 1;
+
+  for (const line of lines) {
+    // Look for numbers that look like currency (e.g. 150,000.00 or 150.000,00)
+    const amountMatch = line.match(/(?:Rp\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)/);
+    
+    // Look for dates (e.g. 12/01, 12 Jan, etc.)
+    const dateMatch = line.match(/(\d{1,2}[\/\-\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|\d{1,2})(?:[\/\-\s]\d{2,4})?)/i);
+    
+    if (amountMatch) {
+      const amountStr = amountMatch[1].replace(/[^0-9]/g, '');
+      let amountVal = parseFloat(amountStr);
+      // Assume last 2 digits might be cents if it originally had a decimal, but safe to just take the raw number if it's large enough, or handle appropriately. 
+      // For simplicity in Indonesian context, let's treat the cleaned digits as the amount (ignoring decimals if they are just .00).
+      // A better heuristic: if the original string ended with ,00 or .00, remove them before parsing.
+      const cleanAmountStr = amountMatch[1].replace(/[,.]00$/, '').replace(/[^0-9]/g, '');
+      amountVal = parseFloat(cleanAmountStr);
+
+      if (amountVal > 0 && line.toLowerCase().includes('trf') || line.toLowerCase().includes('db') || line.toLowerCase().includes('keluar')) {
+        parsedMutations.push({
+          id: `mut-pdf-${currentId++}`,
+          tanggal: dateMatch ? dateMatch[1] : '',
+          keterangan: cleanText(line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '')),
+          nominal: amountVal,
+          matched: false
+        });
+      } else if (amountVal > 0) {
+        // Fallback for general lines with amounts, assume they are debits for this test
+        parsedMutations.push({
+          id: `mut-pdf-${currentId++}`,
+          tanggal: dateMatch ? dateMatch[1] : '',
+          keterangan: cleanText(line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '')),
+          nominal: amountVal,
+          matched: false
+        });
+      }
+    }
+  }
+
+  if (parsedMutations.length === 0) {
+    throw new Error("No mutations found");
+  }
+
   state.mutations = parsedMutations;
 }
 
@@ -1113,7 +1149,7 @@ function reconcileTransactions() {
         selisih_nominal: selisih,
         keterangan_mutasi: bestMatch.keterangan,
         status_rekonsiliasi: status,
-        catatan_rekonsiliasi: selisih > 0 ? \`Mutasi lebih besar dari request Telegram sebesar \${formatRupiah(selisih)}\` : (selisih < 0 ? \`Mutasi lebih kecil dari request Telegram sebesar \${formatRupiah(Math.abs(selisih))}\` : 'Nominal cocok')
+        catatan_rekonsiliasi: selisih > 0 ? `Mutasi lebih besar dari request Telegram sebesar ${formatRupiah(selisih)}` : (selisih < 0 ? `Mutasi lebih kecil dari request Telegram sebesar ${formatRupiah(Math.abs(selisih))}` : 'Nominal cocok')
       });
     } else {
       state.unmatchedTransactions.push({
@@ -1156,9 +1192,9 @@ function reconcileTransactions() {
 }
 
 function selisihHtml(val, noColor = false) {
-  if (val > 0) return noColor ? \`+ \${formatRupiah(val)}\` : \`<span class="text-red">+ \${formatRupiah(val)}</span>\`;
-  if (val < 0) return noColor ? \`- \${formatRupiah(Math.abs(val))}\` : \`<span class="text-amber">- \${formatRupiah(Math.abs(val))}</span>\`;
-  return noColor ? formatRupiah(0) : \`<span class="text-green">\${formatRupiah(0)}</span>\`;
+  if (val > 0) return noColor ? `+ ${formatRupiah(val)}` : `<span class="text-red">+ ${formatRupiah(val)}</span>`;
+  if (val < 0) return noColor ? `- ${formatRupiah(Math.abs(val))}` : `<span class="text-amber">- ${formatRupiah(Math.abs(val))}</span>`;
+  return noColor ? formatRupiah(0) : `<span class="text-green">${formatRupiah(0)}</span>`;
 }
 
 function reconBadge(status) {
@@ -1193,33 +1229,33 @@ function reconToRow(tx) {
 
 function renderReconRow(tx) {
   const codes = (tx.kodeCG || []).length ? tx.kodeCG : ['-'];
-  return \`
+  return `
     <tr>
       <td>
-        <div class="cell-main">\${escapeHtml(tx.tanggal_request)}</div>
-        <div class="cell-sub">Mutasi: \${escapeHtml(tx.tanggal_mutasi)}</div>
+        <div class="cell-main">${escapeHtml(tx.tanggal_request)}</div>
+        <div class="cell-sub">Mutasi: ${escapeHtml(tx.tanggal_mutasi)}</div>
       </td>
       <td>
-        <div class="cell-main">\${escapeHtml(tx.vendor)}</div>
-        <div class="cell-sub">a.n \${escapeHtml(tx.atasNama)}</div>
-        <div class="cell-sub">\${escapeHtml(tx.noRekening)}</div>
+        <div class="cell-main">${escapeHtml(tx.vendor)}</div>
+        <div class="cell-sub">a.n ${escapeHtml(tx.atasNama)}</div>
+        <div class="cell-sub">${escapeHtml(tx.noRekening)}</div>
       </td>
       <td class="money-cell">
-        <div class="cell-main">\${formatRupiah(tx.nominal_telegram)}</div>
-        <div class="cell-sub">Mut: \${formatRupiah(tx.nominal_mutasi)}</div>
+        <div class="cell-main">${formatRupiah(tx.nominal_telegram)}</div>
+        <div class="cell-sub">Mut: ${formatRupiah(tx.nominal_mutasi)}</div>
       </td>
       <td class="money-cell">
-        \${selisihHtml(tx.selisih_nominal)}
+        ${selisihHtml(tx.selisih_nominal)}
       </td>
       <td class="desc-cell">
-        <div class="desc-text">\${escapeHtml(tx.deskripsi)}</div>
-        <div class="cell-sub">Keterangan Mutasi: \${escapeHtml(tx.keterangan_mutasi)}</div>
-        <div class="cell-sub">\${escapeHtml(tx.catatan_rekonsiliasi)}</div>
-        <div class="chip-wrap">\${codes.map((code) => \`<span class="code-chip">\${escapeHtml(code)}</span>\`).join('')}</div>
+        <div class="desc-text">${escapeHtml(tx.deskripsi)}</div>
+        <div class="cell-sub">Keterangan Mutasi: ${escapeHtml(tx.keterangan_mutasi)}</div>
+        <div class="cell-sub">${escapeHtml(tx.catatan_rekonsiliasi)}</div>
+        <div class="chip-wrap">${codes.map((code) => `<span class="code-chip">${escapeHtml(code)}</span>`).join('')}</div>
       </td>
-      <td>\${reconBadge(tx.status_rekonsiliasi)}</td>
+      <td>${reconBadge(tx.status_rekonsiliasi)}</td>
     </tr>
-  \`;
+  `;
 }
 
 function renderReconTable(rows, emptyTitle, emptyDesc) {
@@ -1227,7 +1263,7 @@ function renderReconTable(rows, emptyTitle, emptyDesc) {
     els.tableHost.innerHTML = emptyState(emptyTitle, emptyDesc);
     return;
   }
-  els.tableHost.innerHTML = \`
+  els.tableHost.innerHTML = `
     <div class="table-scroll">
       <table class="ledger-table">
         <thead>
@@ -1241,11 +1277,11 @@ function renderReconTable(rows, emptyTitle, emptyDesc) {
           </tr>
         </thead>
         <tbody>
-          \${rows.map(renderReconRow).join('')}
+          ${rows.map(renderReconRow).join('')}
         </tbody>
       </table>
     </div>
-  \`;
+  `;
 }
 
 function renderRekonsiliasiMutasi() {

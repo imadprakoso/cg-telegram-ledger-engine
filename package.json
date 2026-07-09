@@ -1,0 +1,29 @@
+{
+  "name": "cg-telegram-ledger-engine",
+  "version": "1.0.0",
+  "description": "Aplikasi web statis untuk mengubah hasil export chat Telegram `messages.html` menjadi data transaksi accounting yang rapi.",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imadprakoso/cg-telegram-ledger-engine.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/imadprakoso/cg-telegram-ledger-engine/issues"
+  },
+  "homepage": "https://github.com/imadprakoso/cg-telegram-ledger-engine#readme",
+  "devDependencies": {
+    "vite": "^8.1.4"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.1.200"
+  }
+}
