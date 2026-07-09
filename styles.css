@@ -213,7 +213,7 @@ code {
 
 .upload-card,
 .content-panel {
-  margin: 0 26px;
+  margin: 0 26px 16px 26px;
   border: 1px solid var(--line);
   border-radius: var(--radius-xl);
   background: var(--surface);
@@ -557,6 +557,21 @@ code {
   border-color: var(--black);
   background: var(--black);
   color: white;
+}
+
+.text-red {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.text-amber {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+.text-green {
+  color: var(--green);
+  font-weight: 700;
 }
 
 .empty-state {

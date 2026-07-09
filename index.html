@@ -20,6 +20,10 @@
 
           <nav class="top-tabs" aria-label="Main navigation">
             <button class="tab-pill active" data-tab="transaksi">Transaksi Final</button>
+            <button class="tab-pill" data-tab="rekonsiliasi">Rekonsiliasi Mutasi</button>
+            <button class="tab-pill" data-tab="tidak-match">Nominal Tidak Match</button>
+            <button class="tab-pill" data-tab="belum-mutasi">Belum Ada di Mutasi</button>
+            <button class="tab-pill" data-tab="tanpa-request">Mutasi Tanpa Request</button>
             <button class="tab-pill" data-tab="riwayat">Riwayat List</button>
             <button class="tab-pill" data-tab="mentah">Data Chat Mentah</button>
             <button class="tab-pill" data-tab="keyword">Master Keyword</button>
@@ -52,8 +56,27 @@
             <label for="fileInput" class="upload-button">Pilih messages.html</label>
             <input id="fileInput" type="file" accept=".html,text/html" />
             <div class="file-meta">
-              <strong id="fileName">Belum ada file</strong>
+              <strong id="fileName">Belum ada file Telegram</strong>
               <span id="fileHint">Sistem otomatis memfilter List TF CG final per tanggal.</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="upload-card" id="mutationUploadCard">
+          <div class="upload-copy">
+            <div class="icon-bubble">🏦</div>
+            <div>
+              <h2>Upload Mutasi Bank</h2>
+              <p>Pilih file mutasi bank berformat CSV untuk mencocokkan nominal transaksi.</p>
+            </div>
+          </div>
+
+          <div class="upload-box">
+            <label for="mutationInput" class="upload-button">Pilih Mutasi CSV</label>
+            <input id="mutationInput" type="file" accept=".csv,text/csv" />
+            <div class="file-meta">
+              <strong id="mutationFileName">Belum ada file Mutasi</strong>
+              <span id="mutationFileHint">Pastikan CSV memiliki kolom tanggal, keterangan, dan mutasi keluar.</span>
             </div>
           </div>
         </section>
@@ -74,6 +97,25 @@
           <article class="summary-card">
             <span>Riwayat List</span>
             <strong id="statRiwayat">0</strong>
+          </article>
+        </section>
+
+        <section class="summary-grid mutation-summary" id="mutationSummaryGrid" style="display: none;" aria-label="Ringkasan Mutasi">
+          <article class="summary-card">
+            <span>Total Mutasi Keluar</span>
+            <strong id="statMutasiKeluar">0</strong>
+          </article>
+          <article class="summary-card">
+            <span>Total Cocok</span>
+            <strong id="statCocok">0</strong>
+          </article>
+          <article class="summary-card warning-card">
+            <span>Total Tidak Match</span>
+            <strong id="statTidakMatch">0</strong>
+          </article>
+          <article class="summary-card">
+            <span>Selisih Bersih</span>
+            <strong id="statSelisihBersih">Rp 0</strong>
           </article>
         </section>
 

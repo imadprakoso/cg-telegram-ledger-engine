@@ -12,6 +12,11 @@ const state = {
     category: '',
     validation: '',
   },
+  mutationFileName: '',
+  mutations: [],
+  reconciliationResults: [],
+  unmatchedMutations: [],
+  unmatchedTransactions: [],
 };
 
 const kategoriRules = {
@@ -54,9 +59,20 @@ const els = {
   statPengeluaran: document.getElementById('statPengeluaran'),
   statPerluDicek: document.getElementById('statPerluDicek'),
   statRiwayat: document.getElementById('statRiwayat'),
+  mutationInput: document.getElementById('mutationInput'),
+  mutationFileName: document.getElementById('mutationFileName'),
+  mutationFileHint: document.getElementById('mutationFileHint'),
+  mutationSummaryGrid: document.getElementById('mutationSummaryGrid'),
+  statMutasiKeluar: document.getElementById('statMutasiKeluar'),
+  statCocok: document.getElementById('statCocok'),
+  statTidakMatch: document.getElementById('statTidakMatch'),
+  statSelisihBersih: document.getElementById('statSelisihBersih'),
 };
 
 els.fileInput.addEventListener('change', handleFileChange);
+if (els.mutationInput) {
+  els.mutationInput.addEventListener('change', handleMutationChange);
+}
 els.exportBtn.addEventListener('click', exportWorkbook);
 els.searchInput.addEventListener('input', (e) => {
   state.filters.search = e.target.value;
@@ -547,12 +563,42 @@ function renderStats() {
 
 function renderPanel() {
   els.transactionFilters.style.display = state.activeTab === 'transaksi' ? 'grid' : 'none';
+  
+  if (['rekonsiliasi', 'tidak-match', 'belum-mutasi', 'tanpa-request'].includes(state.activeTab)) {
+    els.mutationSummaryGrid.style.display = 'grid';
+    document.querySelector('.upload-card:not(#mutationUploadCard)').style.display = 'none';
+    els.mutationInput.closest('.upload-card').style.display = 'block';
+  } else {
+    els.mutationSummaryGrid.style.display = 'none';
+    document.querySelector('.upload-card:not(#mutationUploadCard)').style.display = 'block';
+    if(els.mutationInput) els.mutationInput.closest('.upload-card').style.display = 'none';
+  }
 
   if (state.activeTab === 'transaksi') {
     els.panelKicker.textContent = 'Transaksi final';
     els.panelTitle.textContent = 'Data transaksi final';
     els.panelInfo.textContent = `${state.filteredTransactions.length} dari ${state.transactions.length} transaksi tampil.`;
     renderTransactionTable();
+  } else if (state.activeTab === 'rekonsiliasi') {
+    els.panelKicker.textContent = 'Rekonsiliasi Mutasi';
+    els.panelTitle.textContent = 'Hasil pencocokan mutasi dengan Telegram';
+    els.panelInfo.textContent = `Menampilkan semua mutasi dan transaksi.`;
+    renderRekonsiliasiMutasi();
+  } else if (state.activeTab === 'tidak-match') {
+    els.panelKicker.textContent = 'Nominal Tidak Match';
+    els.panelTitle.textContent = 'Transaksi dengan selisih nominal';
+    els.panelInfo.textContent = `Transaksi Telegram yang memiliki selisih nominal dengan mutasi bank.`;
+    renderNominalTidakMatch();
+  } else if (state.activeTab === 'belum-mutasi') {
+    els.panelKicker.textContent = 'Belum Ada di Mutasi';
+    els.panelTitle.textContent = 'Transaksi Telegram belum ada di mutasi';
+    els.panelInfo.textContent = `Transaksi yang terekam di Telegram tapi belum ditemukan di mutasi.`;
+    renderBelumMutasi();
+  } else if (state.activeTab === 'tanpa-request') {
+    els.panelKicker.textContent = 'Mutasi Tanpa Request';
+    els.panelTitle.textContent = 'Mutasi tanpa pasangan transaksi';
+    els.panelInfo.textContent = `Pengeluaran di mutasi bank yang belum ada laporan di Telegram.`;
+    renderMutasiTanpaRequest();
   } else if (state.activeTab === 'riwayat') {
     els.panelKicker.textContent = 'Riwayat List TF';
     els.panelTitle.textContent = 'Riwayat list Telegram';
@@ -784,6 +830,20 @@ function buildWorkbookSheets() {
   sheets.push({ name: 'Kurang Nota', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi === 'Kurang Nota').map(txToRow)) });
   sheets.push({ name: 'Kurang Invoice', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi === 'Kurang Invoice').map(txToRow)) });
   sheets.push({ name: 'Perlu Dicek', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi !== 'Lengkap').map(txToRow)) });
+  
+  if (state.reconciliationResults.length > 0) {
+    sheets.push({ name: 'Rekonsiliasi Mutasi', rows: objectRowsToSheet(state.reconciliationResults.map(reconToRow)) });
+    sheets.push({ name: 'Nominal Tidak Match', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.status_rekonsiliasi === 'Nominal Tidak Match').map(reconToRow)) });
+    sheets.push({ name: 'Selisih Lebih', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.selisih_nominal > 0).map(reconToRow)) });
+    sheets.push({ name: 'Selisih Kurang', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.selisih_nominal < 0).map(reconToRow)) });
+  }
+  if (state.unmatchedTransactions.length > 0) {
+    sheets.push({ name: 'Belum Ada di Mutasi', rows: objectRowsToSheet(state.unmatchedTransactions.map(reconToRow)) });
+  }
+  if (state.unmatchedMutations.length > 0) {
+    sheets.push({ name: 'Mutasi Tanpa Request', rows: objectRowsToSheet(state.unmatchedMutations.map(reconToRow)) });
+  }
+
   sheets.push({ name: 'Rekap Vendor', rows: objectRowsToSheet(aggregateBy(state.transactions, 'vendor')) });
   sheets.push({ name: 'Rekap Rekening', rows: objectRowsToSheet(aggregateBy(state.transactions, 'noRekening')) });
   sheets.push({ name: 'Rekap Kategori', rows: objectRowsToSheet(aggregateBy(state.transactions, 'kategori')) });
@@ -940,4 +1000,268 @@ function escapeXml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+// ==========================================
+// REKONSILIASI MUTASI BANK LOGIC
+// ==========================================
+
+async function handleMutationChange(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  state.mutationFileName = file.name;
+  els.mutationFileName.textContent = file.name;
+  els.mutationFileHint.textContent = 'Memproses file mutasi...';
+
+  try {
+    const text = await file.text();
+    parseMutationCsv(text);
+    reconcileTransactions();
+    els.mutationFileHint.textContent = `${state.mutations.length} data mutasi keluar ditemukan.`;
+    render();
+  } catch (error) {
+    console.error(error);
+    els.mutationFileHint.textContent = 'Gagal memproses file mutasi CSV.';
+  }
+}
+
+function parseMutationCsv(csvText) {
+  const lines = csvText.split('\n').filter(line => line.trim());
+  if (lines.length < 2) return;
+  
+  const headers = lines[0].toLowerCase().split(',').map(h => h.trim().replace(/["']/g, ''));
+  const dateIdx = headers.findIndex(h => h.includes('tanggal') || h.includes('date'));
+  const descIdx = headers.findIndex(h => h.includes('keterangan') || h.includes('desc'));
+  const debitIdx = headers.findIndex(h => h.includes('keluar') || h.includes('debit') || h.includes('tarik') || h.includes('amount'));
+  
+  if (debitIdx === -1) {
+    els.mutationFileHint.textContent = 'Kolom nominal (keluar/debit) tidak ditemukan di CSV.';
+    return;
+  }
+
+  const parsedMutations = [];
+  
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',').map(c => c.trim().replace(/["']/g, ''));
+    if (cols.length < 2) continue;
+    
+    const debitRaw = cols[debitIdx] || '0';
+    let debitVal = parseFloat(debitRaw.replace(/[^\d.-]/g, ''));
+    
+    // Asumsikan ini file mutasi khusus keluar, atau jika ada minus
+    if (isNaN(debitVal) || debitVal === 0) continue;
+    debitVal = Math.abs(debitVal); // Pastikan positif
+    
+    parsedMutations.push({
+      id: `mut-${i}`,
+      tanggal: dateIdx !== -1 ? cols[dateIdx] : '',
+      keterangan: descIdx !== -1 ? cols[descIdx] : '',
+      nominal: debitVal,
+      matched: false
+    });
+  }
+  state.mutations = parsedMutations;
+}
+
+function reconcileTransactions() {
+  state.reconciliationResults = [];
+  state.unmatchedMutations = [];
+  state.unmatchedTransactions = [];
+
+  const mutations = [...state.mutations];
+  const txs = [...state.transactions];
+
+  let totalCocok = 0;
+  let totalTidakMatch = 0;
+  let totalSelisihBersih = 0;
+
+  txs.forEach(tx => {
+    // 1. Cari kandidat by Nominal
+    const sameNominal = mutations.filter(m => !m.matched && m.nominal === tx.nominal);
+    
+    // 2. Cari by Deskripsi/Vendor
+    const sameDesc = mutations.filter(m => !m.matched && (m.keterangan.toLowerCase().includes(tx.vendor.toLowerCase()) || m.keterangan.toLowerCase().includes(tx.atasNama.toLowerCase())));
+
+    let bestMatch = null;
+    let status = 'Belum Ada di Mutasi';
+    let selisih = 0;
+
+    if (sameNominal.length > 0) {
+      bestMatch = sameNominal[0]; // Ambil yang pertama (bisa dikembangkan cek tanggal)
+      status = 'Cocok';
+    } else if (sameDesc.length > 0) {
+      bestMatch = sameDesc[0];
+      status = 'Nominal Tidak Match';
+      selisih = bestMatch.nominal - tx.nominal;
+    }
+
+    if (bestMatch) {
+      bestMatch.matched = true;
+      if (status === 'Cocok') totalCocok++;
+      if (status === 'Nominal Tidak Match') {
+        totalTidakMatch++;
+        totalSelisihBersih += selisih;
+      }
+
+      state.reconciliationResults.push({
+        ...tx,
+        tanggal_request: tx.tanggalLabel,
+        tanggal_mutasi: bestMatch.tanggal,
+        nominal_telegram: tx.nominal,
+        nominal_mutasi: bestMatch.nominal,
+        selisih_nominal: selisih,
+        keterangan_mutasi: bestMatch.keterangan,
+        status_rekonsiliasi: status,
+        catatan_rekonsiliasi: selisih > 0 ? \`Mutasi lebih besar dari request Telegram sebesar \${formatRupiah(selisih)}\` : (selisih < 0 ? \`Mutasi lebih kecil dari request Telegram sebesar \${formatRupiah(Math.abs(selisih))}\` : 'Nominal cocok')
+      });
+    } else {
+      state.unmatchedTransactions.push({
+        ...tx,
+        tanggal_request: tx.tanggalLabel,
+        tanggal_mutasi: '-',
+        nominal_telegram: tx.nominal,
+        nominal_mutasi: 0,
+        selisih_nominal: -tx.nominal,
+        keterangan_mutasi: '-',
+        status_rekonsiliasi: 'Belum Ada di Mutasi',
+        catatan_rekonsiliasi: 'Belum ada transaksi di mutasi bank yang cocok'
+      });
+    }
+  });
+
+  state.unmatchedMutations = mutations.filter(m => !m.matched).map(m => ({
+    tanggal_request: '-',
+    tanggal_mutasi: m.tanggal,
+    vendor: '-',
+    noRekening: '-',
+    atasNama: '-',
+    nominal_telegram: 0,
+    nominal_mutasi: m.nominal,
+    selisih_nominal: m.nominal,
+    deskripsi: '-',
+    keterangan_mutasi: m.keterangan,
+    status_rekonsiliasi: 'Mutasi Tanpa Request',
+    catatan_rekonsiliasi: 'Mutasi keluar ini tidak ada request di Telegram',
+    kodeCG: [],
+    kodeOT: []
+  }));
+
+  if (els.statMutasiKeluar) els.statMutasiKeluar.textContent = state.mutations.length.toLocaleString('id-ID');
+  if (els.statCocok) els.statCocok.textContent = totalCocok.toLocaleString('id-ID');
+  if (els.statTidakMatch) els.statTidakMatch.textContent = totalTidakMatch.toLocaleString('id-ID');
+  if (els.statSelisihBersih) {
+    els.statSelisihBersih.textContent = selisihHtml(totalSelisihBersih, true);
+  }
+}
+
+function selisihHtml(val, noColor = false) {
+  if (val > 0) return noColor ? \`+ \${formatRupiah(val)}\` : \`<span class="text-red">+ \${formatRupiah(val)}</span>\`;
+  if (val < 0) return noColor ? \`- \${formatRupiah(Math.abs(val))}\` : \`<span class="text-amber">- \${formatRupiah(Math.abs(val))}</span>\`;
+  return noColor ? formatRupiah(0) : \`<span class="text-green">\${formatRupiah(0)}</span>\`;
+}
+
+function reconBadge(status) {
+  const tones = {
+    'Cocok': 'green',
+    'Kemungkinan Cocok': 'blue',
+    'Nominal Tidak Match': 'red',
+    'Belum Ada di Mutasi': 'amber',
+    'Mutasi Tanpa Request': 'dark',
+    'Duplikat Kandidat': 'purple'
+  };
+  return badge(status, tones[status] || '');
+}
+
+function reconToRow(tx) {
+  return {
+    'Tanggal Request': tx.tanggal_request || '-',
+    'Tanggal Mutasi': tx.tanggal_mutasi || '-',
+    'Vendor': tx.vendor || '-',
+    'No Rekening': tx.noRekening || '-',
+    'Atas Nama': tx.atasNama || '-',
+    'Nominal Telegram': tx.nominal_telegram || 0,
+    'Nominal Mutasi': tx.nominal_mutasi || 0,
+    'Selisih': tx.selisih_nominal || 0,
+    'Status Rekonsiliasi': tx.status_rekonsiliasi || '-',
+    'Kode CG': (tx.kodeCG || []).join('; '),
+    'Deskripsi Barang': tx.deskripsi || '-',
+    'Keterangan Mutasi': tx.keterangan_mutasi || '-',
+    'Catatan Rekonsiliasi': tx.catatan_rekonsiliasi || '-'
+  };
+}
+
+function renderReconRow(tx) {
+  const codes = (tx.kodeCG || []).length ? tx.kodeCG : ['-'];
+  return \`
+    <tr>
+      <td>
+        <div class="cell-main">\${escapeHtml(tx.tanggal_request)}</div>
+        <div class="cell-sub">Mutasi: \${escapeHtml(tx.tanggal_mutasi)}</div>
+      </td>
+      <td>
+        <div class="cell-main">\${escapeHtml(tx.vendor)}</div>
+        <div class="cell-sub">a.n \${escapeHtml(tx.atasNama)}</div>
+        <div class="cell-sub">\${escapeHtml(tx.noRekening)}</div>
+      </td>
+      <td class="money-cell">
+        <div class="cell-main">\${formatRupiah(tx.nominal_telegram)}</div>
+        <div class="cell-sub">Mut: \${formatRupiah(tx.nominal_mutasi)}</div>
+      </td>
+      <td class="money-cell">
+        \${selisihHtml(tx.selisih_nominal)}
+      </td>
+      <td class="desc-cell">
+        <div class="desc-text">\${escapeHtml(tx.deskripsi)}</div>
+        <div class="cell-sub">Keterangan Mutasi: \${escapeHtml(tx.keterangan_mutasi)}</div>
+        <div class="cell-sub">\${escapeHtml(tx.catatan_rekonsiliasi)}</div>
+        <div class="chip-wrap">\${codes.map((code) => \`<span class="code-chip">\${escapeHtml(code)}</span>\`).join('')}</div>
+      </td>
+      <td>\${reconBadge(tx.status_rekonsiliasi)}</td>
+    </tr>
+  \`;
+}
+
+function renderReconTable(rows, emptyTitle, emptyDesc) {
+  if (!rows.length) {
+    els.tableHost.innerHTML = emptyState(emptyTitle, emptyDesc);
+    return;
+  }
+  els.tableHost.innerHTML = \`
+    <div class="table-scroll">
+      <table class="ledger-table">
+        <thead>
+          <tr>
+            <th style="width: 140px;">Tanggal</th>
+            <th style="width: 180px;">Vendor & Rekening</th>
+            <th style="width: 140px;">Nominal</th>
+            <th style="width: 120px;">Selisih</th>
+            <th>Deskripsi & Keterangan</th>
+            <th style="width: 150px;">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          \${rows.map(renderReconRow).join('')}
+        </tbody>
+      </table>
+    </div>
+  \`;
+}
+
+function renderRekonsiliasiMutasi() {
+  const allRecons = [...state.reconciliationResults, ...state.unmatchedTransactions, ...state.unmatchedMutations];
+  renderReconTable(allRecons, 'Belum ada data rekonsiliasi', 'Upload file Telegram dan Mutasi CSV untuk memulai pencocokan.');
+}
+
+function renderNominalTidakMatch() {
+  const rows = state.reconciliationResults.filter(r => r.status_rekonsiliasi === 'Nominal Tidak Match');
+  renderReconTable(rows, 'Tidak ada selisih nominal', 'Semua transaksi yang cocok memiliki nominal yang pas.');
+}
+
+function renderBelumMutasi() {
+  renderReconTable(state.unmatchedTransactions, 'Semua sudah ada di mutasi', 'Semua transaksi Telegram berhasil dicocokkan dengan mutasi bank.');
+}
+
+function renderMutasiTanpaRequest() {
+  renderReconTable(state.unmatchedMutations, 'Tidak ada mutasi tanpa request', 'Semua mutasi bank memiliki pasangan request di Telegram.');
 }
