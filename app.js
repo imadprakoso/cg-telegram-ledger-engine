@@ -569,12 +569,8 @@ function renderPanel() {
   
   if (['rekonsiliasi', 'tidak-match', 'belum-mutasi', 'tanpa-request'].includes(state.activeTab)) {
     els.mutationSummaryGrid.style.display = 'grid';
-    document.querySelector('.upload-card:not(#mutationUploadCard)').style.display = 'none';
-    els.mutationInput.closest('.upload-card').style.display = 'block';
   } else {
     els.mutationSummaryGrid.style.display = 'none';
-    document.querySelector('.upload-card:not(#mutationUploadCard)').style.display = 'block';
-    if(els.mutationInput) els.mutationInput.closest('.upload-card').style.display = 'none';
   }
 
   if (state.activeTab === 'transaksi') {
@@ -1033,7 +1029,7 @@ async function handleMutationChange(event) {
     }
   } catch (error) {
     console.error(error);
-    els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca atau terjadi kesalahan.';
+    els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca.';
   }
 }
 
