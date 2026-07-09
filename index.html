@@ -20,6 +20,7 @@
 
           <nav class="top-tabs" aria-label="Main navigation">
             <button class="tab-pill active" data-tab="transaksi">Transaksi Final</button>
+            <button class="tab-pill" data-tab="mutasi">Mutasi Bank</button>
             <button class="tab-pill" data-tab="rekonsiliasi">Rekonsiliasi Mutasi</button>
             <button class="tab-pill" data-tab="tidak-match">Nominal Tidak Match</button>
             <button class="tab-pill" data-tab="belum-mutasi">Belum Ada di Mutasi</button>
@@ -68,6 +69,7 @@
             <div>
               <h2>Upload PDF Mutasi Bank</h2>
               <p>Upload file PDF mutasi bank untuk rekonsiliasi nominal dengan transaksi Telegram.</p>
+              <p style="margin-top: 8px; font-size: 0.85rem; color: #666;">Jika PDF mutasi tidak bisa dibaca, kemungkinan PDF berupa scan/gambar. Sistem akan mencoba OCR otomatis.</p>
             </div>
           </div>
 
@@ -76,7 +78,8 @@
             <input id="mutationInput" type="file" accept=".pdf" hidden />
             <div class="file-meta">
               <strong id="mutationFileName">Belum ada PDF mutasi dipilih</strong>
-              <span id="mutationFileHint">File harus berformat .pdf</span>
+              <span id="mutationFileHint">Menunggu PDF</span>
+              <span id="mutationOcrProgress" style="display: none; color: var(--accent); font-weight: 500; font-size: 0.9rem; margin-top: 4px;"></span>
             </div>
           </div>
         </section>

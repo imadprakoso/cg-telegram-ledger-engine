@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+import Tesseract from 'tesseract.js';
 
 const state = {
   fileName: '',
@@ -70,6 +71,7 @@ const els = {
   statCocok: document.getElementById('statCocok'),
   statTidakMatch: document.getElementById('statTidakMatch'),
   statSelisihBersih: document.getElementById('statSelisihBersih'),
+  mutationOcrProgress: document.getElementById('mutationOcrProgress'),
 };
 
 els.fileInput.addEventListener('change', handleFileChange);
@@ -567,7 +569,7 @@ function renderStats() {
 function renderPanel() {
   els.transactionFilters.style.display = state.activeTab === 'transaksi' ? 'grid' : 'none';
   
-  if (['rekonsiliasi', 'tidak-match', 'belum-mutasi', 'tanpa-request'].includes(state.activeTab)) {
+  if (['rekonsiliasi', 'tidak-match', 'belum-mutasi', 'tanpa-request', 'mutasi'].includes(state.activeTab)) {
     els.mutationSummaryGrid.style.display = 'grid';
   } else {
     els.mutationSummaryGrid.style.display = 'none';
@@ -578,6 +580,11 @@ function renderPanel() {
     els.panelTitle.textContent = 'Data transaksi final';
     els.panelInfo.textContent = `${state.filteredTransactions.length} dari ${state.transactions.length} transaksi tampil.`;
     renderTransactionTable();
+  } else if (state.activeTab === 'mutasi') {
+    els.panelKicker.textContent = 'Mutasi Bank';
+    els.panelTitle.textContent = 'Data hasil ekstraksi mutasi bank';
+    els.panelInfo.textContent = `${state.mutations.length} transaksi mutasi ditemukan.`;
+    renderMutasiBank();
   } else if (state.activeTab === 'rekonsiliasi') {
     els.panelKicker.textContent = 'Rekonsiliasi Mutasi';
     els.panelTitle.textContent = 'Hasil pencocokan mutasi dengan Telegram';
@@ -830,6 +837,10 @@ function buildWorkbookSheets() {
   sheets.push({ name: 'Kurang Invoice', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi === 'Kurang Invoice').map(txToRow)) });
   sheets.push({ name: 'Perlu Dicek', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi !== 'Lengkap').map(txToRow)) });
   
+  if (state.mutations.length > 0) {
+    sheets.push({ name: 'Mutasi Bank', rows: objectRowsToSheet(state.mutations.map(mutToRow)) });
+  }
+
   if (state.reconciliationResults.length > 0) {
     sheets.push({ name: 'Rekonsiliasi Mutasi', rows: objectRowsToSheet(state.reconciliationResults.map(reconToRow)) });
     sheets.push({ name: 'Nominal Tidak Match', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.status_rekonsiliasi === 'Nominal Tidak Match').map(reconToRow)) });
@@ -1016,83 +1027,141 @@ async function handleMutationChange(event) {
 
   state.mutationFileName = file.name;
   els.mutationFileName.textContent = file.name;
-  els.mutationFileHint.textContent = 'Memproses file mutasi PDF...';
+  els.mutationFileHint.textContent = 'Memproses PDF...';
+  if (els.mutationOcrProgress) {
+    els.mutationOcrProgress.style.display = 'none';
+    els.mutationOcrProgress.textContent = '';
+  }
 
   try {
     const arrayBuffer = await file.arrayBuffer();
-    await parseMutationPdf(arrayBuffer);
+    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+    const pdf = await loadingTask.promise;
+    
+    let fullText = '';
+    let readingMethod = 'PDF Text';
+    
+    // Attempt digital text extraction
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(item => item.str).join(' ');
+      fullText += pageText + '\n';
+    }
+
+    const keywordCheck = /(MUTASI|DEBIT|KREDIT|SALDO|TRANSFER|BIAYA|TANGGAL|BCA|MANDIRI|BRI|DANA)/i.test(fullText);
+
+    if (fullText.trim().length > 100 || keywordCheck) {
+      els.mutationFileHint.textContent = 'Teks PDF berhasil dibaca.';
+    } else {
+      els.mutationFileHint.textContent = 'PDF tidak memiliki teks, menjalankan OCR...';
+      readingMethod = 'OCR';
+      fullText = await runOcrOnPdf(pdf);
+      if (fullText.trim().length > 100 || /(MUTASI|DEBIT|KREDIT|SALDO|TRANSFER|BIAYA|TANGGAL|BCA|MANDIRI|BRI|DANA|\d{4,})/i.test(fullText)) {
+         els.mutationFileHint.textContent = 'OCR berhasil membaca PDF.';
+      } else {
+         els.mutationFileHint.textContent = 'OCR gagal membaca PDF. Silakan gunakan PDF digital atau upload mutasi yang lebih jelas.';
+      }
+    }
+
+    await parseMutationText(fullText, readingMethod);
     
     if (state.mutations.length > 0) {
       reconcileTransactions();
-      els.mutationFileHint.textContent = `${state.mutations.length} data mutasi keluar ditemukan.`;
-      render();
+      els.mutationFileHint.textContent = `${state.mutations.length} data mutasi ditemukan.`;
+    } else {
+      els.mutationFileHint.textContent = 'Tidak ada transaksi mutasi yang dapat diparse, cek tab Mutasi Bank untuk teks mentah.';
     }
+    render();
   } catch (error) {
     console.error(error);
     els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca.';
   }
 }
 
-async function parseMutationPdf(arrayBuffer) {
-  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-  const pdf = await loadingTask.promise;
+async function runOcrOnPdf(pdf) {
   let fullText = '';
+  if (els.mutationOcrProgress) els.mutationOcrProgress.style.display = 'block';
 
   for (let i = 1; i <= pdf.numPages; i++) {
+    if (els.mutationOcrProgress) els.mutationOcrProgress.textContent = `OCR halaman ${i} dari ${pdf.numPages}...`;
     const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items.map(item => item.str).join(' ');
-    fullText += pageText + '\n';
-  }
+    const viewport = page.getViewport({ scale: 1.5 });
+    
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
 
-  // Basic parsing logic to extract amounts and descriptions from the raw text
-  // Since PDF layouts vary wildly, we look for standard patterns: Dates and Currency amounts.
+    const renderContext = { canvasContext: context, viewport: viewport };
+    await page.render(renderContext).promise;
+    const dataUrl = canvas.toDataURL('image/png');
+
+    try {
+      const { data: { text } } = await Tesseract.recognize(dataUrl, 'ind', {
+        logger: m => {
+          if (m.status === 'recognizing text' && els.mutationOcrProgress) {
+            const pct = Math.round(m.progress * 100);
+            els.mutationOcrProgress.textContent = `OCR halaman ${i} dari ${pdf.numPages} (${pct}%)...`;
+          }
+        }
+      });
+      fullText += text + '\n';
+    } catch (e) {
+      console.warn("OCR ind failed, trying eng", e);
+      const { data: { text } } = await Tesseract.recognize(dataUrl, 'eng', {
+        logger: m => {
+          if (m.status === 'recognizing text' && els.mutationOcrProgress) {
+            const pct = Math.round(m.progress * 100);
+            els.mutationOcrProgress.textContent = `OCR halaman ${i} dari ${pdf.numPages} (${pct}%)...`;
+          }
+        }
+      });
+      fullText += text + '\n';
+    }
+  }
+  
+  if (els.mutationOcrProgress) els.mutationOcrProgress.style.display = 'none';
+  return fullText;
+}
+
+async function parseMutationText(fullText, readingMethod) {
   const parsedMutations = [];
   const lines = fullText.split('\n').filter(line => line.trim());
-  
   let currentId = 1;
 
   for (const line of lines) {
-    // Look for numbers that look like currency (e.g. 150,000.00 or 150.000,00)
     const amountMatch = line.match(/(?:Rp\s*)?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)/);
-    
-    // Look for dates (e.g. 12/01, 12 Jan, etc.)
-    const dateMatch = line.match(/(\d{1,2}[\/\-\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|\d{1,2})(?:[\/\-\s]\d{2,4})?)/i);
+    const dateMatch = line.match(/(\d{1,2}[\/\-\s.](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|\d{1,2})(?:[\/\-\s.]\d{2,4})?)/i);
     
     if (amountMatch) {
-      const amountStr = amountMatch[1].replace(/[^0-9]/g, '');
-      let amountVal = parseFloat(amountStr);
-      // Assume last 2 digits might be cents if it originally had a decimal, but safe to just take the raw number if it's large enough, or handle appropriately. 
-      // For simplicity in Indonesian context, let's treat the cleaned digits as the amount (ignoring decimals if they are just .00).
-      // A better heuristic: if the original string ended with ,00 or .00, remove them before parsing.
       const cleanAmountStr = amountMatch[1].replace(/[,.]00$/, '').replace(/[^0-9]/g, '');
-      amountVal = parseFloat(cleanAmountStr);
+      const amountVal = parseFloat(cleanAmountStr);
+      const isDebit = line.toLowerCase().includes('trf') || line.toLowerCase().includes('db') || line.toLowerCase().includes('keluar') || line.toLowerCase().includes('debit') || line.toLowerCase().includes('dr') || line.toLowerCase().includes('tarik');
+      const isKredit = line.toLowerCase().includes('cr') || line.toLowerCase().includes('kredit') || line.toLowerCase().includes('masuk') || line.toLowerCase().includes('setor');
 
-      if (amountVal > 0 && line.toLowerCase().includes('trf') || line.toLowerCase().includes('db') || line.toLowerCase().includes('keluar')) {
+      // Simple heuristic: if we have a reasonable amount
+      if (amountVal > 0) {
         parsedMutations.push({
-          id: `mut-pdf-${currentId++}`,
+          id: `mut-${readingMethod.toLowerCase().replace(/\s/g, '-')}-${currentId++}`,
           tanggal: dateMatch ? dateMatch[1] : '',
           keterangan: cleanText(line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '')),
           nominal: amountVal,
-          matched: false
-        });
-      } else if (amountVal > 0) {
-        // Fallback for general lines with amounts, assume they are debits for this test
-        parsedMutations.push({
-          id: `mut-pdf-${currentId++}`,
-          tanggal: dateMatch ? dateMatch[1] : '',
-          keterangan: cleanText(line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '')),
-          nominal: amountVal,
+          nominal_keluar: isDebit ? amountVal : (isKredit ? 0 : amountVal), // Default to debit
+          nominal_masuk: isKredit ? amountVal : 0,
+          saldo: 0,
+          no_rekening_tujuan: '', // Need complex regex to parse reliably
+          nama_penerima: '', // Need complex regex to parse reliably
+          sumber_pembacaan: readingMethod,
+          status_parse: 'Berhasil',
+          raw_text: line,
           matched: false
         });
       }
     }
   }
 
-  if (parsedMutations.length === 0) {
-    throw new Error("No mutations found");
-  }
-
+  state.rawMutationText = fullText;
   state.mutations = parsedMutations;
 }
 
@@ -1206,6 +1275,7 @@ function reconBadge(status) {
 }
 
 function reconToRow(tx) {
+  const selisihPct = tx.nominal_telegram ? ((tx.selisih_nominal / tx.nominal_telegram) * 100).toFixed(2) + '%' : '0%';
   return {
     'Tanggal Request': tx.tanggal_request || '-',
     'Tanggal Mutasi': tx.tanggal_mutasi || '-',
@@ -1215,11 +1285,27 @@ function reconToRow(tx) {
     'Nominal Telegram': tx.nominal_telegram || 0,
     'Nominal Mutasi': tx.nominal_mutasi || 0,
     'Selisih': tx.selisih_nominal || 0,
+    'Selisih %': selisihPct,
     'Status Rekonsiliasi': tx.status_rekonsiliasi || '-',
     'Kode CG': (tx.kodeCG || []).join('; '),
     'Deskripsi Barang': tx.deskripsi || '-',
     'Keterangan Mutasi': tx.keterangan_mutasi || '-',
     'Catatan Rekonsiliasi': tx.catatan_rekonsiliasi || '-'
+  };
+}
+
+function mutToRow(m) {
+  return {
+    'Tanggal Mutasi': m.tanggal || '-',
+    'Keterangan Mutasi': m.keterangan || '-',
+    'Debit / Keluar': m.nominal_keluar || 0,
+    'Kredit / Masuk': m.nominal_masuk || 0,
+    'Saldo': m.saldo || 0,
+    'No Rekening Tujuan': m.no_rekening_tujuan || '-',
+    'Nama Penerima': m.nama_penerima || '-',
+    'Sumber Pembacaan': m.sumber_pembacaan || '-',
+    'Status Parse': m.status_parse || '-',
+    'Teks Mentah': m.raw_text || '-'
   };
 }
 
@@ -1279,6 +1365,66 @@ function renderReconTable(rows, emptyTitle, emptyDesc) {
     </div>
   `;
 }
+function renderMutasiBank() {
+  if (state.mutations.length === 0) {
+    els.tableHost.innerHTML = emptyState('Belum ada data mutasi', 'Upload file PDF mutasi bank untuk melihat data.');
+    
+    // Fallback: show raw text if parsing failed but we have text
+    if (state.rawMutationText) {
+      const rawHtml = `
+        <div style="margin-top: 24px; padding: 16px; background: #fafafa; border: 1px solid #eaeaea; border-radius: 8px;">
+          <h4 style="margin-bottom: 12px; color: #333;">Teks Mentah dari PDF (Gagal Parsing)</h4>
+          <textarea readonly style="width: 100%; height: 300px; padding: 12px; font-family: monospace; font-size: 13px; border: 1px solid #ccc; border-radius: 4px;">${state.rawMutationText}</textarea>
+        </div>
+      `;
+      els.tableHost.innerHTML += rawHtml;
+    }
+    return;
+  }
+
+  let html = `
+    <div class="table-container">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Tanggal Mutasi</th>
+            <th>Keterangan</th>
+            <th class="text-right">Debit (Keluar)</th>
+            <th class="text-right">Kredit (Masuk)</th>
+            <th>Sumber</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  state.mutations.forEach(m => {
+    html += `
+      <tr>
+        <td style="white-space: nowrap;">${m.tanggal || '-'}</td>
+        <td>${m.keterangan || '-'}</td>
+        <td class="text-right font-mono" style="color: var(--accent);">${m.nominal_keluar > 0 ? formatRupiah(m.nominal_keluar) : '-'}</td>
+        <td class="text-right font-mono" style="color: var(--success);">${m.nominal_masuk > 0 ? formatRupiah(m.nominal_masuk) : '-'}</td>
+        <td>${badge(m.sumber_pembacaan || 'PDF', 'blue')}</td>
+        <td>${badge(m.status_parse || 'Berhasil', 'success')}</td>
+      </tr>
+    `;
+  });
+
+  html += `</tbody></table></div>`;
+  
+  if (state.rawMutationText) {
+      html += `
+        <details style="margin-top: 24px; padding: 16px; background: #fafafa; border: 1px solid #eaeaea; border-radius: 8px;">
+          <summary style="cursor: pointer; font-weight: 500; color: #333;">Lihat Teks Mentah / OCR Hasil Ekstraksi</summary>
+          <textarea readonly style="width: 100%; height: 200px; padding: 12px; font-family: monospace; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; margin-top: 12px;">${state.rawMutationText}</textarea>
+        </details>
+      `;
+  }
+  
+  els.tableHost.innerHTML = html;
+}
+
 
 function renderRekonsiliasiMutasi() {
   const allRecons = [...state.reconciliationResults, ...state.unmatchedTransactions, ...state.unmatchedMutations];
