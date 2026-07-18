@@ -1471,6 +1471,23 @@ function processBCABlock(blockLines, parsedArray, currentId) {
     const isDebit = typeStr.toUpperCase() === 'DB';
     const isKredit = typeStr.toUpperCase() === 'CR';
     
+    // Attempt to extract account number and recipient from description
+    let extractedAccount = '';
+    let extractedName = '';
+    
+    // Sometimes account number is clearly stated, e.g., "KE 1234567890"
+    const rekMatch = descriptionLines.join(' ').match(/\b(\d{10,})\b/);
+    if (rekMatch) extractedAccount = rekMatch[1];
+    
+    // In BCA, the last description line is often the recipient name,
+    // unless it's a generic word like "TRSF E-BANKING DB"
+    if (descriptionLines.length > 0) {
+      const lastLine = descriptionLines[descriptionLines.length - 1];
+      if (!/(TRSF|E-BANKING|BIAYA|ADMIN|WS\d+)/i.test(lastLine)) {
+        extractedName = lastLine;
+      }
+    }
+    
     parsedArray.push({
       id: `mut-bca-pdf-${currentId}`,
       tanggal: dateStr,
@@ -1479,8 +1496,8 @@ function processBCABlock(blockLines, parsedArray, currentId) {
       nominal_keluar: isDebit ? amountVal : 0,
       nominal_masuk: isKredit ? amountVal : 0,
       saldo: balanceVal,
-      no_rekening_tujuan: '',
-      nama_penerima: '',
+      no_rekening_tujuan: extractedAccount,
+      nama_penerima: extractedName,
       sumber_pembacaan: 'bca_pdf',
       status_parse: 'Berhasil',
       raw_text: rawText,
@@ -1680,6 +1697,26 @@ function reconcileTransactions() {
       else if (status === 'MATCH + BIAYA ADMIN') catatan = `Cocok dengan biaya admin ${formatRupiah(selisih)}`;
       else catatan = selisih > 0 ? `Mutasi lebih besar dari request Telegram sebesar ${formatRupiah(selisih)}` : (selisih < 0 ? `Mutasi lebih kecil dari request Telegram sebesar ${formatRupiah(Math.abs(selisih))}` : 'Nominal cocok');
 
+      let rekening_tujuan = bestMatch.no_rekening_tujuan || '';
+      let nama_penerima = bestMatch.nama_penerima || '';
+      
+      // Fallbacks
+      if (!nama_penerima) {
+        if (tx.vendor && tx.vendor !== 'Perlu Dicek') nama_penerima = tx.vendor;
+        else if (tx.atasNama) nama_penerima = tx.atasNama;
+      }
+      
+      let keterangan_mutasi_display = '';
+      if (rekening_tujuan && nama_penerima) {
+        keterangan_mutasi_display = `${rekening_tujuan} - ${nama_penerima}`;
+      } else if (nama_penerima) {
+        keterangan_mutasi_display = nama_penerima;
+      } else if (rekening_tujuan) {
+        keterangan_mutasi_display = rekening_tujuan;
+      } else {
+        keterangan_mutasi_display = "Rekening/Penerima Tidak Terbaca";
+      }
+
       state.reconciliationResults.push({
         ...tx,
         tanggal_request: tx.tanggalLabel,
@@ -1689,7 +1726,8 @@ function reconcileTransactions() {
         biaya_admin: biaya_admin,
         selisih_nominal: selisih,
         saldo_setelah_transaksi: bestMatch.saldo,
-        keterangan_mutasi: bestMatch.raw_text,
+        keterangan_mutasi: keterangan_mutasi_display,
+        raw_keterangan_mutasi: bestMatch.raw_text,
         status_rekonsiliasi: status,
         catatan_rekonsiliasi: catatan
       });
@@ -1794,19 +1832,17 @@ function renderReconRow(tx) {
   return `
     <tr>
       <td>${escapeHtml(tx.tanggal_request)}</td>
-      <td>${escapeHtml(tx.tanggal_mutasi)}</td>
       <td>${escapeHtml(tx.vendor)}</td>
-      <td>${escapeHtml(tx.noRekening)}</td>
-      <td>${escapeHtml(tx.atasNama)}</td>
       <td class="desc-text">${escapeHtml(tx.deskripsi)}</td>
-      <td class="desc-text">${escapeHtml(tx.keterangan_mutasi)}</td>
       <td class="money-cell">${formatRupiah(tx.nominal_telegram)}</td>
+      <td>${escapeHtml(tx.tanggal_mutasi)}</td>
+      <td class="desc-text">
+        <div style="font-weight: 500;">${escapeHtml(tx.keterangan_mutasi)}</div>
+        ${tx.raw_keterangan_mutasi ? `<details style="font-size: 11px; margin-top: 4px; color: var(--text-muted);"><summary style="cursor: pointer;">Teks Asli</summary><div style="margin-top: 4px; padding: 4px; background: var(--surface-2); border-radius: 4px; white-space: pre-wrap;">${escapeHtml(tx.raw_keterangan_mutasi)}</div></details>` : ''}
+      </td>
       <td class="money-cell">${formatRupiah(tx.nominal_mutasi)}</td>
-      <td class="money-cell">${formatRupiah(tx.biaya_admin)}</td>
-      <td class="money-cell">${formatRupiah(tx.saldo_setelah_transaksi)}</td>
       <td class="money-cell">${selisihHtml(tx.selisih_nominal)}</td>
       <td>${reconBadge(tx.status_rekonsiliasi)}</td>
-      <td class="desc-text">${escapeHtml(tx.catatan_rekonsiliasi)}</td>
     </tr>
   `;
 }
@@ -1817,23 +1853,18 @@ function getReconTableHtml(rows, emptyTitle, emptyDesc) {
   }
   return `
     <div class="table-scroll">
-      <table class="ledger-table" style="min-width: 1800px;">
+      <table class="ledger-table" style="min-width: 1200px;">
         <thead>
           <tr>
-            <th>Tgl Request</th>
-            <th>Tgl Mutasi</th>
+            <th>Tanggal Request</th>
             <th>Vendor</th>
-            <th>No Rekening</th>
-            <th>Atas Nama</th>
             <th>Deskripsi List</th>
-            <th>Keterangan Mutasi</th>
             <th>Nominal List TF</th>
+            <th>Tanggal Mutasi</th>
+            <th>Keterangan Mutasi</th>
             <th>Nominal Mutasi Keluar</th>
-            <th>Biaya Admin</th>
-            <th>Saldo</th>
             <th>Selisih</th>
             <th>Status</th>
-            <th>Catatan Sistem</th>
           </tr>
         </thead>
         <tbody>
