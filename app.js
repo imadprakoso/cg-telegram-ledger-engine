@@ -21,6 +21,12 @@ const state = {
   reconciliationResults: [],
   unmatchedMutations: [],
   unmatchedTransactions: [],
+  reconFilters: {
+    search: '',
+    status: 'Semua',
+    date: '',
+    category: ''
+  }
 };
 
 const kategoriRules = {
@@ -588,7 +594,7 @@ function renderStats() {
 function renderPanel() {
   els.transactionFilters.style.display = state.activeTab === 'transaksi' ? 'grid' : 'none';
   
-  if (['rekonsiliasi', 'tidak-match', 'belum-mutasi', 'tanpa-request', 'mutasi'].includes(state.activeTab)) {
+  if (['rekonsiliasi', 'mutasi'].includes(state.activeTab)) {
     els.mutationSummaryGrid.style.display = 'grid';
   } else {
     els.mutationSummaryGrid.style.display = 'none';
@@ -609,21 +615,6 @@ function renderPanel() {
     els.panelTitle.textContent = 'Hasil pencocokan mutasi dengan Telegram';
     els.panelInfo.textContent = `Menampilkan semua mutasi dan transaksi.`;
     renderRekonsiliasiMutasi();
-  } else if (state.activeTab === 'tidak-match') {
-    els.panelKicker.textContent = 'Nominal Tidak Match';
-    els.panelTitle.textContent = 'Transaksi dengan selisih nominal';
-    els.panelInfo.textContent = `Transaksi Telegram yang memiliki selisih nominal dengan mutasi bank.`;
-    renderNominalTidakMatch();
-  } else if (state.activeTab === 'belum-mutasi') {
-    els.panelKicker.textContent = 'Belum Ada di Mutasi';
-    els.panelTitle.textContent = 'Transaksi Telegram belum ada di mutasi';
-    els.panelInfo.textContent = `Transaksi yang terekam di Telegram tapi belum ditemukan di mutasi.`;
-    renderBelumMutasi();
-  } else if (state.activeTab === 'tanpa-request') {
-    els.panelKicker.textContent = 'Mutasi Tanpa Request';
-    els.panelTitle.textContent = 'Mutasi tanpa pasangan transaksi';
-    els.panelInfo.textContent = `Pengeluaran di mutasi bank yang belum ada laporan di Telegram.`;
-    renderMutasiTanpaRequest();
   } else if (state.activeTab === 'riwayat') {
     els.panelKicker.textContent = 'Riwayat List TF';
     els.panelTitle.textContent = 'Riwayat list Telegram';
@@ -1461,12 +1452,11 @@ function renderReconRow(tx) {
   `;
 }
 
-function renderReconTable(rows, emptyTitle, emptyDesc) {
+function getReconTableHtml(rows, emptyTitle, emptyDesc) {
   if (!rows.length) {
-    els.tableHost.innerHTML = emptyState(emptyTitle, emptyDesc);
-    return;
+    return emptyState(emptyTitle, emptyDesc);
   }
-  els.tableHost.innerHTML = `
+  return `
     <div class="table-scroll">
       <table class="ledger-table" style="min-width: 1800px;">
         <thead>
@@ -1492,9 +1482,122 @@ function renderReconTable(rows, emptyTitle, emptyDesc) {
         </tbody>
       </table>
     </div>
-
   `;
 }
+
+function renderRekonsiliasiMutasi() {
+  const allRecons = [...state.reconciliationResults, ...state.unmatchedTransactions, ...state.unmatchedMutations];
+  
+  let sumRequest = 0;
+  let sumMutasi = 0;
+  let sumAdmin = 0;
+  
+  let countMatch = 0;
+  let countTidakMatch = 0;
+  let countBelum = 0;
+  let countTanpaRequest = 0;
+
+  allRecons.forEach(r => {
+    sumRequest += r.nominal_telegram || 0;
+    sumMutasi += r.nominal_mutasi || 0;
+    sumAdmin += r.biaya_admin || 0;
+    
+    if (r.status_rekonsiliasi === 'MATCH' || r.status_rekonsiliasi === 'MATCH + BIAYA ADMIN') {
+      countMatch++;
+    } else if (r.status_rekonsiliasi === 'NOMINAL TIDAK MATCH') {
+      countTidakMatch++;
+    } else if (r.status_rekonsiliasi === 'BELUM DIBAYAR') {
+      countBelum++;
+    } else if (r.status_rekonsiliasi === 'MUTASI TANPA REQUEST') {
+      countTanpaRequest++;
+    }
+  });
+  
+  const sumSelisih = sumMutasi - sumRequest - sumAdmin;
+  const isBalanced = sumSelisih === 0 && countTidakMatch === 0 && countBelum === 0 && countTanpaRequest === 0;
+
+  let filtered = allRecons;
+  const s = state.reconFilters.search.toLowerCase();
+  if (s) {
+    filtered = filtered.filter(r => 
+      (r.vendor || '').toLowerCase().includes(s) || 
+      (r.noRekening || '').toLowerCase().includes(s) || 
+      (r.keterangan_mutasi || '').toLowerCase().includes(s) ||
+      (r.deskripsi || '').toLowerCase().includes(s)
+    );
+  }
+  
+  const statusFilter = state.reconFilters.status;
+  if (statusFilter === 'Hanya Anomali') {
+    filtered = filtered.filter(r => r.status_rekonsiliasi !== 'MATCH' && r.status_rekonsiliasi !== 'MATCH + BIAYA ADMIN');
+  } else if (statusFilter !== 'Semua') {
+    filtered = filtered.filter(r => (r.status_rekonsiliasi || '').toUpperCase() === statusFilter.toUpperCase());
+  }
+
+  const summaryHtml = `
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px;">
+      <div class="stat-card">
+        <div class="stat-label">Total Request</div>
+        <div class="stat-value">${formatRupiah(sumRequest)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Mutasi Keluar</div>
+        <div class="stat-value">${formatRupiah(sumMutasi)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Biaya Admin</div>
+        <div class="stat-value">${formatRupiah(sumAdmin)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Selisih Bersih</div>
+        <div class="stat-value">${selisihHtml(sumSelisih, true)}</div>
+      </div>
+      <div class="stat-card" style="border: 2px solid ${isBalanced ? '#10b981' : '#ef4444'};">
+        <div class="stat-label">Status Akhir</div>
+        <div class="stat-value" style="color: ${isBalanced ? '#10b981' : '#ef4444'}">${isBalanced ? 'BALANCED' : 'NOT BALANCED'}</div>
+      </div>
+    </div>
+    
+    <div style="display: flex; gap: 16px; margin-bottom: 16px; align-items: center; flex-wrap: wrap;">
+      <div class="input-wrap" style="flex: 1; min-width: 250px; margin-bottom: 0;">
+        <svg class="input-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" style="position: absolute; left: 12px; top: 11px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input type="text" id="reconSearchInput" placeholder="Cari vendor, rekening, keterangan..." value="${escapeAttr(state.reconFilters.search)}" style="width: 100%; padding: 10px 10px 10px 40px; border-radius: 6px; border: 1px solid #d1d5db;">
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;" id="reconStatusFilters">
+        ${['Semua', 'Match', 'Match + Biaya Admin', 'Nominal Tidak Match', 'Belum Dibayar', 'Mutasi Tanpa Request', 'Perlu Dicek', 'Hanya Anomali'].map(opt => `
+          <button class="chip-filter ${statusFilter === opt ? 'active' : ''}" data-recon-status="${opt}" style="padding: 6px 12px; border-radius: 20px; border: 1px solid #e5e7eb; background: ${statusFilter === opt ? '#2563eb' : '#fff'}; color: ${statusFilter === opt ? '#fff' : '#4b5563'}; cursor: pointer; font-size: 13px;">
+            ${opt} 
+            ${opt === 'Match' ? `(${countMatch})` : ''}
+            ${opt === 'Nominal Tidak Match' ? `(${countTidakMatch})` : ''}
+            ${opt === 'Belum Dibayar' ? `(${countBelum})` : ''}
+            ${opt === 'Mutasi Tanpa Request' ? `(${countTanpaRequest})` : ''}
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `;
+
+  els.tableHost.innerHTML = summaryHtml + getReconTableHtml(filtered, 'Belum ada data rekonsiliasi', 'Silakan tunggu proses atau upload file yang diperlukan.');
+  
+  // Attach listeners
+  const searchEl = document.getElementById('reconSearchInput');
+  if (searchEl) {
+    searchEl.addEventListener('input', (e) => {
+      state.reconFilters.search = e.target.value;
+      renderRekonsiliasiMutasi();
+      document.getElementById('reconSearchInput').focus();
+    });
+  }
+
+  const chips = document.querySelectorAll('#reconStatusFilters .chip-filter');
+  chips.forEach(chip => {
+    chip.addEventListener('click', (e) => {
+      state.reconFilters.status = e.currentTarget.getAttribute('data-recon-status');
+      renderRekonsiliasiMutasi();
+    });
+  });
+}
+
 function renderMutasiBank() {
   if (state.mutations.length === 0) {
     els.tableHost.innerHTML = emptyState('Belum ada data mutasi', 'Upload file PDF mutasi bank untuk melihat data.');
@@ -1553,23 +1656,4 @@ function renderMutasiBank() {
   }
   
   els.tableHost.innerHTML = html;
-}
-
-
-function renderRekonsiliasiMutasi() {
-  const allRecons = [...state.reconciliationResults, ...state.unmatchedTransactions, ...state.unmatchedMutations];
-  renderReconTable(allRecons, 'Belum ada data rekonsiliasi', 'Upload file Telegram dan Mutasi CSV untuk memulai pencocokan.');
-}
-
-function renderNominalTidakMatch() {
-  const rows = state.reconciliationResults.filter(r => r.status_rekonsiliasi === 'Nominal Tidak Match');
-  renderReconTable(rows, 'Tidak ada selisih nominal', 'Semua transaksi yang cocok memiliki nominal yang pas.');
-}
-
-function renderBelumMutasi() {
-  renderReconTable(state.unmatchedTransactions, 'Semua sudah ada di mutasi', 'Semua transaksi Telegram berhasil dicocokkan dengan mutasi bank.');
-}
-
-function renderMutasiTanpaRequest() {
-  renderReconTable(state.unmatchedMutations, 'Tidak ada mutasi tanpa request', 'Semua mutasi bank memiliki pasangan request di Telegram.');
 }
