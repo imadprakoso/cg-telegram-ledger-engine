@@ -38,7 +38,9 @@ const state = {
     rangeStart: '',
     rangeEnd: '',
     tolerance: false
-  }
+  },
+  telegramParseMode: 'final_list', // 'final_list' | 'raw_request_history'
+  requestCandidates: [],
 };
 
 const kategoriRules = {
@@ -159,6 +161,13 @@ if (els.btnResetDateFilter) {
   els.btnResetDateFilter.addEventListener('click', handleResetDateFilter);
 }
 
+if (els.rangeStartDate) {
+  els.rangeStartDate.addEventListener('change', (e) => {
+    populateRangeEndDate(e.target.value);
+    if (els.dateFilterError) els.dateFilterError.style.display = 'none';
+  });
+}
+
 els.exportBtn.addEventListener('click', () => exportWorkbook(false));
 if (els.exportAllBtn) {
   els.exportAllBtn.addEventListener('click', () => exportWorkbook(true));
@@ -212,6 +221,76 @@ function extractTelegramText(textElement) {
   return text;
 }
 
+// ========== ZIP UTILITIES ==========
+
+function normalizeZipPath(value) {
+  return decodeURIComponent(String(value || ''))
+    .replace(/\\/g, '/')
+    .replace(/^\.?\//, '')
+    .replace(/\/+/g, '/');
+}
+
+async function findBestTelegramHtml(zip) {
+  const entries = Object.values(zip.files);
+  const candidates = entries.filter(entry => {
+    if (entry.dir) return false;
+    const p = normalizeZipPath(entry.name).toLowerCase();
+    return p.endsWith('.html') && (
+      p === 'messages.html' ||
+      p.endsWith('/messages.html') ||
+      p.includes('message')
+    );
+  });
+
+  if (!candidates.length) return null;
+
+  // Score each candidate: prefer those with many .message.default elements
+  const scored = await Promise.all(candidates.map(async entry => {
+    try {
+      const text = await entry.async('text');
+      const doc = new DOMParser().parseFromString(text, 'text/html');
+      const msgCount = doc.querySelectorAll('.message.default').length;
+      const hasHistory = doc.querySelector('.history') ? 100 : 0;
+      return { entry, html: text, score: msgCount * 10 + hasHistory, msgCount };
+    } catch {
+      return { entry, html: '', score: -1, msgCount: 0 };
+    }
+  }));
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.score > 0 ? scored[0] : null;
+}
+
+function buildZipPhotoIndex(zip) {
+  const byNormalizedPath = new Map();
+  const byBasename = new Map();
+
+  Object.values(zip.files).forEach(f => {
+    if (f.dir) return;
+    const normalized = normalizeZipPath(f.name);
+    const lower = normalized.toLowerCase();
+    const isPhoto = lower.includes('/photos/') ||
+      /\.(jpg|jpeg|png|webp)$/i.test(lower);
+    if (!isPhoto) return;
+    byNormalizedPath.set(normalized, f);
+    const base = normalized.split('/').pop();
+    if (!byBasename.has(base)) {
+      byBasename.set(base, f);
+    } else {
+      byBasename.set(base, null); // ambiguous — multiple files with same basename
+    }
+  });
+
+  return { byNormalizedPath, byBasename };
+}
+
+async function loadZipPhoto(entry) {
+  const blob = await entry.async('blob');
+  return URL.createObjectURL(blob);
+}
+
+// ========== MAIN FILE HANDLER ==========
+
 async function handleFileChange(event) {
   const file = event.target.files?.[0];
   if (!file) return;
@@ -219,7 +298,8 @@ async function handleFileChange(event) {
   state.fileName = file.name;
   if (els.fileName) els.fileName.textContent = file.name;
   if (els.fileHint) els.fileHint.textContent = 'Membaca dan memproses file Telegram...';
-  
+
+  // Clear previous photos
   state.photos.clear();
   state.unmatchedPhotos = [];
 
@@ -234,25 +314,31 @@ async function handleFileChange(event) {
       sourceType = 'zip';
       if (els.fileHint) els.fileHint.textContent = 'Mengekstrak ZIP Telegram Export...';
       const zip = await JSZip.loadAsync(file);
-      
-      // Recursive search for messages.html
-      const htmlEntry = Object.values(zip.files).find(entry => {
-        const normalized = entry.name.toLowerCase().replace(/\\/g, '/');
-        return !entry.dir && (normalized === 'messages.html' || normalized.endsWith('/messages.html'));
-      });
-      if (!htmlEntry) throw new Error('ZIP tidak berisi messages.html');
-      html = await htmlEntry.async('text');
 
-      // Extract photos
-      const photoFiles = Object.values(zip.files).filter(f => !f.dir && /\/photos\/|^photos\//.test(f.name.replace(/\\/g, '/')));
-      for (const photoFile of photoFiles) {
-        const blob = await photoFile.async('blob');
-        const url = URL.createObjectURL(blob);
-        const pathMatch = photoFile.name.replace(/\\/g, '/').match(/(photos\/.+)$/i);
-        const relativePath = pathMatch ? pathMatch[1] : photoFile.name;
-        state.photos.set(relativePath, url);
+      // 1. Find best Telegram HTML
+      if (els.fileHint) els.fileHint.textContent = 'Mencari file HTML di dalam ZIP...';
+      const best = await findBestTelegramHtml(zip);
+      if (!best) throw new Error('ZIP tidak berisi file HTML Telegram yang valid.');
+      html = best.html;
+
+      // 2. Index all photos with nested path support
+      if (els.fileHint) els.fileHint.textContent = 'Mengindeks foto dari ZIP...';
+      const photoIdx = buildZipPhotoIndex(zip);
+
+      // 3. Load photos into state.photos Map (keyed by normalized path)
+      for (const [normPath, entry] of photoIdx.byNormalizedPath.entries()) {
+        try {
+          const url = await loadZipPhoto(entry);
+          state.photos.set(normPath, url);
+          // Also index by basename for fallback
+          const base = normPath.split('/').pop();
+          if (photoIdx.byBasename.get(base) !== null) {
+            state.photos.set(base, url);
+          }
+        } catch { /* skip bad file */ }
       }
-      photoCount = state.photos.size;
+      photoCount = photoIdx.byNormalizedPath.size;
+
     } else if (fileName.endsWith('.html')) {
       sourceType = 'html';
       html = await file.text();
@@ -277,59 +363,156 @@ async function handleFileChange(event) {
 
   // --- Phase 3: Update UI ---
   try {
+    const mode = state.telegramParseMode;
     const txCount = state.transactions.length;
     const listCount = state.listHistory.length;
+    const rawCount = state.rawMessages.length;
+    const candidateCount = state.requestCandidates?.length || 0;
     let statusMsg = '';
-    if (sourceType === 'zip') {
-      statusMsg = `ZIP Telegram berhasil dibaca. ${txCount} transaksi dari ${listCount} list TF.`;
-      if (photoCount > 0) statusMsg += ` ${photoCount} foto tersedia.`;
-      else statusMsg += ' Folder photos tidak ditemukan.';
+
+    if (mode === 'final_list') {
+      const baseMsg = `${txCount} transaksi dari ${listCount} list TF.`;
+      if (sourceType === 'zip') {
+        statusMsg = `ZIP Telegram berhasil dibaca. ${baseMsg}`;
+        statusMsg += photoCount > 0 ? ` ${photoCount} foto tersedia.` : ' Folder photos tidak ditemukan.';
+      } else {
+        statusMsg = `HTML Telegram berhasil dibaca. ${baseMsg} Foto tidak tersedia pada mode HTML.`;
+      }
     } else {
-      statusMsg = `HTML Telegram berhasil dibaca. ${txCount} transaksi dari ${listCount} list TF. Foto tidak tersedia pada mode HTML.`;
+      // raw_request_history
+      const baseMsg = `${candidateCount} request ditemukan dari ${rawCount} pesan.`;
+      if (sourceType === 'zip') {
+        statusMsg = `ZIP Telegram berhasil dibaca. ${baseMsg}`;
+        statusMsg += photoCount > 0 ? ` ${photoCount} foto tersedia.` : ' Folder photos tidak ditemukan.';
+      } else {
+        statusMsg = `HTML Telegram berhasil dibaca. ${baseMsg} Foto tidak tersedia pada mode HTML.`;
+      }
+      statusMsg += ' (Mode Request Mentah — tidak ada Final List TF ditemukan.)';
     }
+
     if (els.fileHint) els.fileHint.textContent = statusMsg;
-    if (els.exportBtn) els.exportBtn.disabled = txCount === 0;
+    if (els.exportBtn) els.exportBtn.disabled = txCount === 0 && candidateCount === 0;
     render();
   } catch (error) {
     console.error('Telegram UI rendering failed:', error);
     if (els.fileHint) els.fileHint.textContent = `Data berhasil dibaca (${state.transactions.length} transaksi), tetapi tampilan gagal diperbarui: ${error.message}`;
-    // Still try to export even if render failed
     if (els.exportBtn) els.exportBtn.disabled = state.transactions.length === 0;
   }
 }
 
+// ========== HELPER: PRESERVE BR AS NEWLINES ==========
+
+function htmlElementToText(element) {
+  if (!element) return '';
+  const clone = element.cloneNode(true);
+  clone.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+  return clone.textContent
+    .replace(/\u00a0/g, ' ')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// ========== CHAT NOISE FILTER ==========
+
+const NOISE_PATTERNS = [
+  /^\.{1,3}$/,
+  /^(done|wait|oke+|okey|okee|iya|iyes|sip|siap|ok|noted|tq|thx|thanks|makasih|sudah|udah|blm|belum|nanti|cek|ntar|mantap|mantab)$/i,
+  /^@[a-z0-9_]+$/i,
+  /^[\p{Emoji}\s]+$/u,
+  /^(ini blm|udah belum|gimana|sudah belum|belum ngasih|minta inv|ini oke\??)$/i,
+];
+
+function isChatNoise(text) {
+  const t = (text || '').trim();
+  if (!t) return true;
+  if (t.length < 3 && !/\d/.test(t)) return true;
+  return NOISE_PATTERNS.some(p => p.test(t));
+}
+
+// ========== MAIN PARSER ==========
+
 function parseTelegramHtml(html) {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
-  const messageNodes = Array.from(doc.querySelectorAll('.message'));
+
+  // Support both .history > .message and direct .message.default
+  const messageNodes = Array.from(
+    doc.querySelectorAll('.history .message, .message.default, .message.service')
+  );
+  // Also include top-level messages not nested in .history
+  const allMessageNodes = messageNodes.length > 0 ? messageNodes :
+    Array.from(doc.querySelectorAll('.message'));
+
   let currentServiceDate = '';
+  let lastDefaultSender = '';
+  let lastDefaultDateTitle = '';
   const rawMessages = [];
 
-  messageNodes.forEach((node, index) => {
+  allMessageNodes.forEach((node, index) => {
+    // ---- Service date messages ----
     if (node.classList.contains('service')) {
-      const serviceText = cleanText(node.textContent || '');
+      const bodyEl = node.querySelector('.body.details, .details');
+      const serviceText = htmlElementToText(bodyEl) || cleanText(node.textContent || '');
       if (serviceText) currentServiceDate = serviceText;
       return;
     }
 
+    const isJoined = node.classList.contains('joined');
     const id = node.id || `message-${index}`;
     const body = node.querySelector('.body');
-    const dateEl = node.querySelector('.pull_right.date.details');
-    const dateTitle = dateEl?.getAttribute('title') || '';
+
+    // Date/time from pull_right.date.details title attribute
+    const dateEl = node.querySelector('.pull_right.date.details, .date.details');
+    const dateTitle = dateEl?.getAttribute('title') || (isJoined ? lastDefaultDateTitle : '');
     const timeText = cleanText(dateEl?.textContent || '');
+
+    // Sender: for joined messages, inherit from last default
     const senderEl = body?.querySelector(':scope > .from_name') || node.querySelector('.from_name');
-    const sender = cleanText(senderEl?.childNodes?.[0]?.textContent || senderEl?.textContent || '');
-    const textEls = Array.from(node.querySelectorAll('.text'));
-    const text = textEls.map((el) => extractTelegramText(el)).filter(Boolean).join('\n');
-    const photoLinks = Array.from(node.querySelectorAll('a.photo_wrap[href]')).map((a) => a.getAttribute('href')).filter(Boolean);
+    const rawSender = cleanText(senderEl?.childNodes?.[0]?.textContent || senderEl?.textContent || '');
+    const sender = rawSender || (isJoined ? lastDefaultSender : '');
+
+    if (!isJoined && rawSender) {
+      lastDefaultSender = rawSender;
+      lastDefaultDateTitle = dateTitle;
+    }
+
+    // Text: prefer htmlElementToText for proper BR handling
+    const textEl = node.querySelector('.text');
+    const text = htmlElementToText(textEl);
+
+    // Photo hrefs (nested paths supported)
+    const photoLinks = Array.from(node.querySelectorAll('a.photo_wrap[href], a[href*="photos/"]'))
+      .map(a => a.getAttribute('href'))
+      .filter(Boolean);
+
+    // Reply target
+    const replyEl = node.querySelector('.reply_to a[href^="#go_to_message"]');
+    const replyToId = replyEl?.getAttribute('href')?.replace('#go_to_message', '') || null;
+
+    // Timestamps
     const timestamp = parseTelegramTimestamp(dateTitle, currentServiceDate, timeText);
     const messageDate = timestamp.dateLabel || currentServiceDate || '';
     const messageDateKey = timestamp.dateKey || dateLabelToKey(messageDate) || '';
+
+    // Resolve photo blob URLs — try normalized path first, then basename
+    const resolvedPhotoLinks = photoLinks.map(href => {
+      const normHref = normalizeZipPath(href);
+      const blobUrl = state.photos.get(normHref)
+        || state.photos.get(href)
+        || state.photos.get(href.split('/').pop())
+        || null;
+      return { href, normHref, blobUrl };
+    });
+
     const type = detectMessageType(text, photoLinks);
 
     rawMessages.push({
       id,
       index,
+      isJoined,
       sender,
       dateTitle,
       timeText,
@@ -339,6 +522,8 @@ function parseTelegramHtml(html) {
       timestampMs: timestamp.ms || index,
       text,
       photoLinks,
+      resolvedPhotoLinks,
+      replyToId,
       type,
     });
   });
@@ -347,33 +532,195 @@ function parseTelegramHtml(html) {
   state.photoIndex = buildPhotoIndex(rawMessages);
   state.listHistory = buildListHistory(rawMessages);
   state.finalLists = pickFinalLists(state.listHistory);
-  state.transactions = buildFinalTransactions(state.finalLists, state.photoIndex);
-  
+
+  if (state.finalLists.length > 0) {
+    // FINAL LIST MODE
+    state.telegramParseMode = 'final_list';
+    state.transactions = buildFinalTransactions(state.finalLists, state.photoIndex);
+    state.requestCandidates = [];
+  } else {
+    // RAW REQUEST HISTORY MODE — no List TF found
+    state.telegramParseMode = 'raw_request_history';
+    state.requestCandidates = buildRawRequestCandidates(rawMessages);
+    // Promote candidates as transactions so existing UI/tables can render them
+    state.transactions = state.requestCandidates;
+  }
+
   mapPhotosToTransactions(rawMessages);
   hydrateFilters();
 
   console.log({
+    telegramParseMode: state.telegramParseMode,
     totalMessages: rawMessages.length,
     listMessagesCount: state.listHistory.length,
     finalListsCount: state.finalLists.length,
-    firstListTextSample: state.listHistory[0] ? state.listHistory[0].text.substring(0, 100) : null,
-    firstParsedTransaction: state.transactions[0]
+    requestCandidatesCount: state.requestCandidates?.length || 0,
+    firstParsedTransaction: state.transactions[0],
   });
 }
 
+// ========== RAW REQUEST HISTORY PARSER ==========
+
+const BANK_PATTERN = /\b(BCA|BRI|BJB|MANDIRI|BSI|SEABANK|DANA|OVO|GOPAY|JAGO|JENIUS|NIAGA|BNI|PERMATA|BUKOPIN)\b/i;
+const ACCOUNT_PATTERN = /\b\d{8,16}\b/;
+// Note: do NOT use /g flag on module-level regex that are used inside .match()
+// or they'll retain lastIndex and produce inconsistent results.
+function matchCgCodes(text) {
+  return unique((text.match(/\bCG[A-Z]{2,4}\d{10}\b/gi) || []).map(c => c.toUpperCase()));
+}
+function matchOtCodes(text) {
+  return unique((text.match(/\bOT\d{8}CG[A-Z]{2,4}\d{4}\b/gi) || []).map(c => c.toUpperCase()));
+}
+
+function isRequestCandidate(msg) {
+  const t = msg.text || '';
+  if (isChatNoise(t) && !msg.photoLinks?.length) return false;
+  return (
+    BANK_PATTERN.test(t) ||
+    ACCOUNT_PATTERN.test(t) ||
+    /\bCG[A-Z]{2,4}\d{10}\b/i.test(t) ||
+    /\bOT\d{8}CG[A-Z]{2,4}\d{4}\b/i.test(t) ||
+    /(?:Rp\.?|IDR)\s*[\d.]+/i.test(t) ||
+    /\d+\s*(rb|ribu|jt|juta)/i.test(t) ||
+    /\btransfer\b/i.test(t) ||
+    msg.photoLinks?.length > 0
+  );
+}
+
+function extractRawNominal(text) {
+  // Avoid extracting account numbers as nominal
+  // Priority 1: explicit Rp / IDR
+  let m = text.match(/(?:Rp\.?|IDR)\s*([\d.,]+)/i);
+  if (m) {
+    const raw = m[1].replace(/\./g, '').replace(/,/g, '');
+    const val = Number(raw);
+    if (val >= 1000) return val;
+  }
+  // Priority 2: suffix rb/ribu/jt
+  m = text.match(/(\d+(?:[.,]\d+)?)\s*(rb|ribu|jt|juta)/i);
+  if (m) {
+    const base = Number(m[1].replace(',', '.'));
+    const mult = /jt|juta/i.test(m[2]) ? 1_000_000 : 1_000;
+    const val = Math.round(base * mult);
+    if (val >= 1000) return val;
+  }
+  return null;
+}
+
+function extractRawAccountInfo(text) {
+  const lines = text.split('\n');
+  let bank = '', noRekening = '', atasNama = '', vendor = '';
+
+  for (const line of lines) {
+    const bankMatch = line.match(BANK_PATTERN);
+    if (bankMatch && !bank) bank = bankMatch[1].toUpperCase();
+
+    const accMatch = line.match(/\b(\d{8,16})\b/);
+    if (accMatch && !noRekening) {
+      // Don't grab CG codes as account numbers
+      if (!/^CG/i.test(line)) noRekening = accMatch[1];
+    }
+
+    // a.n / atas nama / AN
+    const anMatch = line.match(/(?:a\.?\s*n\.?|a\/n|an\.?|atas\s+nama)\s*[.:–]?\s*([^()0-9\n]{3,40})/i);
+    if (anMatch && !atasNama) atasNama = cleanText(anMatch[1]);
+
+    // vendor in parens
+    const vendorMatch = line.match(/\(([^)]{2,30})\)/);
+    if (vendorMatch && !vendor) vendor = cleanText(vendorMatch[1]);
+  }
+
+  return { bank, noRekening, atasNama, vendor };
+}
+
+function buildRawRequestCandidates(messages) {
+  const candidates = [];
+
+  messages.forEach((msg, idx) => {
+    if (!isRequestCandidate(msg)) return;
+
+    const text = msg.text || '';
+    const cgCodes = matchCgCodes(text);
+    const otCodes = matchOtCodes(text);
+    const nominal = extractRawNominal(text);
+    const account = extractRawAccountInfo(text);
+    const photoLinks = msg.resolvedPhotoLinks || msg.photoLinks?.map(h => ({ href: h, blobUrl: state.photos.get(normalizeZipPath(h)) || state.photos.get(h) || null })) || [];
+
+    const vendor = account.vendor || account.atasNama || 'Perlu Dicek';
+    const category = classifyTransaction(`${vendor} ${text}`);
+
+    let status = 'Lengkap';
+    if (!nominal) status = 'Nominal Belum Terbaca';
+    else if (!account.noRekening && !account.bank) status = 'Rekening Belum Terbaca';
+    else if (!vendor || vendor === 'Perlu Dicek') status = 'Vendor Belum Terbaca';
+    else if (!cgCodes.length && !otCodes.length && !account.noRekening) status = 'Perlu Dicek';
+
+    candidates.push({
+      id: `raw-${msg.id}-${idx}`,
+      tanggal: msg.dateKey || '',
+      tanggalLabel: msg.dateLabel || formatDateKey(msg.dateKey) || msg.serviceDate || '',
+      jam: msg.timeText || '',
+      pengirim: msg.sender || '',
+      dateKey: msg.dateKey || '',
+      metode: account.bank || 'Perlu Dicek',
+      noRekening: account.noRekening || '',
+      atasNama: account.atasNama || '',
+      vendor,
+      nominal: nominal || 0,
+      deskripsi: text.slice(0, 200),
+      kodeCG: cgCodes,
+      kodeOT: otCodes,
+      jumlahKodeCG: cgCodes.length,
+      kategori: category,
+      akunAkuntansi: akunMap[category] || 'Perlu Dicek',
+      statusNota: photoLinks.length > 0 ? 'Ada' : 'Kurang Nota',
+      statusInvoice: 'Tidak Wajib',
+      statusOCR: photoLinks.some(p => p.blobUrl) ? 'Tersedia untuk OCR' : 'Foto Tidak Tersedia',
+      statusValidasi: status,
+      catatanSistem: `Mode: Request Mentah`,
+      catatanAkuntan: '',
+      linkFoto: photoLinks,
+      photoCount: photoLinks.length,
+      sourceMessageId: msg.id,
+      teksMentah: text,
+      isFallback: false,
+      isRawCandidate: true,
+    });
+  });
+
+  return candidates;
+}
+
 function mapPhotosToTransactions(rawMessages) {
-  // Extract all photos from messages
+  // Extract all photos from messages — use resolvedPhotoLinks if available
   const allPhotos = [];
   rawMessages.forEach(msg => {
-    if (msg.photoLinks && msg.photoLinks.length > 0) {
-      msg.photoLinks.forEach(href => {
+    const links = msg.resolvedPhotoLinks || [];
+    const rawHrefs = msg.photoLinks || [];
+
+    if (links.length > 0) {
+      links.forEach(link => {
         allPhotos.push({
-          href,
+          href: link.href,
+          normHref: link.normHref || normalizeZipPath(link.href),
           messageId: msg.id,
           date: msg.dateLabel,
           timestampMs: msg.timestampMs,
           text: msg.text,
-          blobUrl: state.photos.get(href) || null
+          blobUrl: link.blobUrl || state.photos.get(normalizeZipPath(link.href)) || state.photos.get(link.href) || state.photos.get(link.href.split('/').pop()) || null,
+        });
+      });
+    } else if (rawHrefs.length > 0) {
+      rawHrefs.forEach(href => {
+        const norm = normalizeZipPath(href);
+        allPhotos.push({
+          href,
+          normHref: norm,
+          messageId: msg.id,
+          date: msg.dateLabel,
+          timestampMs: msg.timestampMs,
+          text: msg.text,
+          blobUrl: state.photos.get(norm) || state.photos.get(href) || state.photos.get(href.split('/').pop()) || null,
         });
       });
     }
@@ -1627,32 +1974,54 @@ function normalizeMutationDate(dateStr) {
   return '';
 }
 
+function buildDateSelectOptions(dates, placeholder) {
+  return `<option value="">${placeholder}</option>` +
+    dates.map(d => `<option value="${d}">${formatDateKey(d)}</option>`).join('');
+}
+
+function populateRangeEndDate(startValue) {
+  if (!els.rangeEndDate) return;
+  const dates = state.availableMutationDates;
+  const filtered = startValue
+    ? dates.filter(d => d >= startValue)
+    : dates;
+  els.rangeEndDate.innerHTML = buildDateSelectOptions(filtered, '-- Pilih Tanggal Selesai --');
+  els.rangeEndDate.disabled = !startValue;
+  els.rangeEndDate.value = '';
+}
+
 function extractMutationDates() {
   const dates = new Set();
   state.mutations.forEach(m => {
     const norm = normalizeMutationDate(m.tanggal_mutasi || m.tanggal || m.mutationDate || m.date);
     if (norm) {
-      m.tanggalKey = norm; // Store normalized date for easier comparison later
+      m.tanggalKey = norm;
       dates.add(norm);
     }
   });
   state.availableMutationDates = Array.from(dates).sort();
-  
-  if (els.singleDateSelect) {
-    els.singleDateSelect.innerHTML = '<option value="">-- Pilih Tanggal --</option>' + 
-      state.availableMutationDates.map(d => `<option value="${d}">${formatDateKey(d)}</option>`).join('');
-  }
 
-  if (state.availableMutationDates.length > 0) {
+  const allDates = state.availableMutationDates;
+  const optionsHtml = buildDateSelectOptions(allDates, '-- Pilih Tanggal --');
+
+  if (els.singleDateSelect) {
+    els.singleDateSelect.innerHTML = optionsHtml;
+  }
+  if (els.rangeStartDate) {
+    els.rangeStartDate.innerHTML = buildDateSelectOptions(allDates, '-- Pilih Tanggal Mulai --');
+    els.rangeStartDate.value = '';
+  }
+  populateRangeEndDate('');
+
+  if (allDates.length > 0) {
     if (els.dateFilterInfo) {
-      const start = state.availableMutationDates[0];
-      const end = state.availableMutationDates[state.availableMutationDates.length - 1];
+      const start = allDates[0];
+      const end = allDates[allDates.length - 1];
       els.dateFilterInfo.innerHTML = `
         <div style="margin-bottom: 4px;">Periode PDF terdeteksi: <strong style="color: var(--text-main);">${formatDateKey(start)} sampai ${formatDateKey(end)}</strong></div>
-        <div>Jumlah tanggal tersedia: <strong style="color: var(--text-main);">${state.availableMutationDates.length} hari</strong></div>
+        <div>Jumlah tanggal tersedia: <strong style="color: var(--text-main);">${allDates.length} hari</strong></div>
       `;
     }
-    
     if (els.dateFilterCard) {
       els.dateFilterCard.style.display = 'block';
     }
@@ -1706,15 +2075,15 @@ function handleApplyDateFilter() {
 function handleResetDateFilter() {
   if (els.dateFilterError) els.dateFilterError.style.display = 'none';
   if (els.dateModeRadios) {
-    els.dateModeRadios.forEach(r => { 
-      if (r.value === 'all') r.checked = true; 
+    els.dateModeRadios.forEach(r => {
+      if (r.value === 'all') r.checked = true;
     });
   }
   if (els.singleDateContainer) els.singleDateContainer.style.display = 'none';
   if (els.rangeDateContainer) els.rangeDateContainer.style.display = 'none';
   if (els.singleDateSelect) els.singleDateSelect.value = '';
   if (els.rangeStartDate) els.rangeStartDate.value = '';
-  if (els.rangeEndDate) els.rangeEndDate.value = '';
+  populateRangeEndDate('');
   if (els.dateToleranceCheckbox) els.dateToleranceCheckbox.checked = false;
   if (els.dateFilterActiveIndicator) {
     els.dateFilterActiveIndicator.style.display = 'none';

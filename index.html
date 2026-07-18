@@ -141,17 +141,17 @@
               <select id="singleDateSelect" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); width: 100%; max-width: 300px; font-size: 14px;"></select>
             </div>
 
-            <div id="rangeDateContainer" style="display: none; width: 100%; gap: 12px; align-items: center; flex-wrap: wrap;">
+            <div id="rangeDateContainer" style="display: none; width: 100%; gap: 12px; align-items: flex-end; flex-wrap: wrap;">
               <div>
                 <div style="font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px;">Tanggal Mulai</div>
-                <input type="date" id="rangeStartDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+                <select id="rangeStartDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit; min-width: 160px;"><option value="">-- Pilih Tanggal Mulai --</option></select>
               </div>
-              <div style="margin-top: 18px;">
+              <div style="padding-bottom: 10px;">
                 <span style="font-size: 14px; font-weight: 500; color: var(--text-muted);">sampai</span>
               </div>
               <div>
                 <div style="font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px;">Tanggal Selesai</div>
-                <input type="date" id="rangeEndDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+                <select id="rangeEndDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit; min-width: 160px;" disabled><option value="">-- Pilih Tanggal Selesai --</option></select>
               </div>
             </div>
 
