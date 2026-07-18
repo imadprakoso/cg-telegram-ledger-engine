@@ -83,9 +83,16 @@
                <label for="mutationInput" class="upload-button" style="background: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Upload File Lain</label>
             </div>
 
-            <div class="file-meta" style="margin-top: 12px;">
+            <div class="file-meta" style="margin-top: 12px; display: flex; flex-direction: column; gap: 4px;">
               <strong id="mutationFileName">Belum ada PDF mutasi dipilih</strong>
-              <span id="mutationFileHint">Menunggu PDF</span>
+              <div style="font-size: 13px; color: var(--text-muted);">
+                <span style="font-weight: 600; color: var(--text-main);">Status Pembacaan:</span> 
+                <span id="pdfReadStatus">Belum Dibaca</span>
+              </div>
+              <div style="font-size: 13px; color: var(--text-muted);">
+                <span style="font-weight: 600; color: var(--text-main);">Status Parsing:</span> 
+                <span id="mutationParseStatus">Belum Diparse</span>
+              </div>
               <span id="mutationOcrProgress" style="display: none; color: var(--accent); font-weight: 500; font-size: 0.9rem; margin-top: 4px;"></span>
             </div>
           </div>

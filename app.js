@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 import Tesseract from 'tesseract.js';
 import JSZip from 'jszip';
 
@@ -88,6 +89,8 @@ const els = {
   manualPasteInput: document.getElementById('manualPasteInput'),
   btnParseManual: document.getElementById('btnParseManual'),
   mutationInputLabel: document.getElementById('mutationInputLabel'),
+  pdfReadStatus: document.getElementById('pdfReadStatus'),
+  mutationParseStatus: document.getElementById('mutationParseStatus'),
 };
 
 els.fileInput.addEventListener('change', handleFileChange);
@@ -1286,7 +1289,10 @@ async function handleMutationChange(event) {
 
   state.mutationFileName = file.name;
   els.mutationFileName.textContent = file.name;
-  els.mutationFileHint.textContent = 'Memproses PDF...';
+  els.mutationFileHint.style.display = 'none';
+  els.pdfReadStatus.textContent = 'Membaca PDF...';
+  els.mutationParseStatus.textContent = 'Belum Diparse';
+  
   if (els.mutationOcrProgress) {
     els.mutationOcrProgress.style.display = 'none';
     els.mutationOcrProgress.textContent = '';
@@ -1300,46 +1306,186 @@ async function handleMutationChange(event) {
 
   try {
     const arrayBuffer = await file.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+    const data = new Uint8Array(arrayBuffer);
+    const loadingTask = pdfjsLib.getDocument({ data, useWorkerFetch: false, isEvalSupported: false });
     const pdf = await loadingTask.promise;
     
     let fullText = '';
     let readingMethod = 'pdf_text';
+    let reconstructedLines = [];
     
     for (let i = 1; i <= pdf.numPages; i++) {
+      els.pdfReadStatus.textContent = `Membaca halaman ${i} dari ${pdf.numPages}`;
+      await new Promise(resolve => setTimeout(resolve, 0)); // yield
+      
       const page = await pdf.getPage(i);
-      const textContent = await page.getTextContent();
+      const textContent = await page.getTextContent({ normalizeWhitespace: true });
+      
       const pageText = textContent.items.map(item => item.str).join(' ');
       fullText += pageText + '\n';
+      
+      // Reconstruct lines based on y coordinate
+      const pageLines = groupTextItemsIntoLines(textContent.items);
+      reconstructedLines = reconstructedLines.concat(pageLines);
     }
 
-    const keywordCheck = /(MUTASI|DEBIT|KREDIT|SALDO|TRANSFER|BIAYA|TANGGAL|BCA|MANDIRI|BRI|DANA)/i.test(fullText);
-
-    if (fullText.trim().length > 100 || keywordCheck) {
-      els.mutationFileHint.textContent = 'PDF digital terbaca.';
-      await parseMutationText(fullText, readingMethod);
+    if (fullText.trim().length > 200) {
+      els.pdfReadStatus.textContent = `PDF Digital Terbaca (${pdf.numPages} halaman)`;
+      els.mutationParseStatus.textContent = 'Memproses transaksi BCA...';
+      await new Promise(resolve => setTimeout(resolve, 0)); // yield
+      
+      // Parse BCA format
+      parseBCAMutationLines(reconstructedLines);
+      
       if (state.mutations.length > 0) {
+        els.mutationParseStatus.textContent = `${state.mutations.length} transaksi mutasi berhasil diparse`;
         reconcileTransactions();
         render();
+      } else {
+        els.mutationParseStatus.textContent = 'Teks PDF terbaca, tetapi format transaksi belum berhasil diparse';
+        if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
       }
     } else {
-      els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca.';
-      if (els.mutationFallbackActions) {
-        els.mutationFallbackActions.style.display = 'flex';
-      }
-      if (els.mutationInputLabel) {
-        els.mutationInputLabel.style.display = 'none';
-      }
+      els.pdfReadStatus.textContent = 'PDF Scan / Tidak Ada Text Layer';
+      els.mutationParseStatus.textContent = 'Gagal memparse karena teks kosong';
+      if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
     }
   } catch (error) {
-    console.error(error);
-    els.mutationFileHint.textContent = 'PDF perlu OCR / teks tidak terbaca.';
-    if (els.mutationFallbackActions) {
-      els.mutationFallbackActions.style.display = 'flex';
+    console.error("PDF extraction failed:", error);
+    els.pdfReadStatus.textContent = 'Gagal Membuka PDF';
+    els.mutationParseStatus.textContent = 'Error pada file PDF.';
+    if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
+  }
+}
+
+function groupTextItemsIntoLines(textItems) {
+  const linesMap = new Map();
+  const tolerance = 3; // y-coordinate tolerance
+  
+  textItems.forEach(item => {
+    if (!item.str.trim()) return;
+    const x = item.transform[4];
+    const y = item.transform[5];
+    
+    let matchedY = null;
+    for (const key of linesMap.keys()) {
+      if (Math.abs(key - y) <= tolerance) {
+        matchedY = key;
+        break;
+      }
     }
-    if (els.mutationInputLabel) {
-      els.mutationInputLabel.style.display = 'none';
+    
+    if (matchedY === null) {
+      linesMap.set(y, [{ str: item.str, x }]);
+    } else {
+      linesMap.get(matchedY).push({ str: item.str, x });
     }
+  });
+
+  // Sort by Y descending (since top is usually higher Y in PDF coordinates, but PDFJS might have it origin bottom-left)
+  const sortedYs = Array.from(linesMap.keys()).sort((a, b) => b - a);
+  
+  const reconstructedLines = [];
+  sortedYs.forEach(y => {
+    const lineItems = linesMap.get(y);
+    lineItems.sort((a, b) => a.x - b.x);
+    reconstructedLines.push(lineItems.map(item => item.str).join(' '));
+  });
+  
+  return reconstructedLines;
+}
+
+function parseBCAMutationLines(lines) {
+  const parsedMutations = [];
+  let currentId = 1;
+  let currentBlock = [];
+  
+  // Date pattern for BCA transaction start (e.g., 01/06/2026 or 01/06)
+  const datePattern = /^\d{2}\/\d{2}(?:\/\d{4})?$/;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    // Check if line starts with a date (start of new block)
+    const firstWord = line.split(' ')[0];
+    if (datePattern.test(firstWord)) {
+      if (currentBlock.length > 0) {
+        processBCABlock(currentBlock, parsedMutations, currentId++);
+        currentBlock = [];
+      }
+    }
+    
+    // Accumulate lines if we are inside a block
+    if (currentBlock.length > 0 || datePattern.test(firstWord)) {
+      currentBlock.push(line);
+    }
+  }
+  
+  // Process last block
+  if (currentBlock.length > 0) {
+    processBCABlock(currentBlock, parsedMutations, currentId++);
+  }
+
+  state.rawMutationText = lines.join('\n');
+  state.mutations = parsedMutations;
+}
+
+function processBCABlock(blockLines, parsedArray, currentId) {
+  const rawText = blockLines.join('\n');
+  const dateMatch = blockLines[0].match(/^(\d{2}\/\d{2}(?:\/\d{4})?)/);
+  const dateStr = dateMatch ? dateMatch[1] : '';
+  
+  // Look for the specific Amount DB/CR Balance pattern
+  // Group 1: Amount, Group 2: DB/CR, Group 3: Balance
+  const amountPattern = /((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})\s+(DB|CR)\s+((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})/;
+  
+  let amountStr = '';
+  let typeStr = '';
+  let balanceStr = '';
+  let descriptionLines = [];
+  
+  for (const line of blockLines) {
+    const match = line.match(amountPattern);
+    if (match) {
+      amountStr = match[1];
+      typeStr = match[2];
+      balanceStr = match[3];
+      
+      // Remove the matching part from the line for the description
+      const descPart = line.replace(match[0], '').trim();
+      if (descPart) descriptionLines.push(descPart);
+    } else {
+      // Remove the date from the first line for description
+      let cleanLine = line;
+      if (line === blockLines[0] && dateStr) {
+        cleanLine = line.replace(dateStr, '').trim();
+      }
+      if (cleanLine) descriptionLines.push(cleanLine);
+    }
+  }
+  
+  if (amountStr && typeStr) {
+    const amountVal = parseFloat(amountStr.replace(/,/g, ''));
+    const balanceVal = parseFloat(balanceStr.replace(/,/g, ''));
+    const isDebit = typeStr.toUpperCase() === 'DB';
+    const isKredit = typeStr.toUpperCase() === 'CR';
+    
+    parsedArray.push({
+      id: `mut-bca-pdf-${currentId}`,
+      tanggal: dateStr,
+      keterangan: cleanText(descriptionLines.join(' ')),
+      nominal: amountVal,
+      nominal_keluar: isDebit ? amountVal : 0,
+      nominal_masuk: isKredit ? amountVal : 0,
+      saldo: balanceVal,
+      no_rekening_tujuan: '',
+      nama_penerima: '',
+      sumber_pembacaan: 'bca_pdf',
+      status_parse: 'Berhasil',
+      raw_text: rawText,
+      matched: false
+    });
   }
 }
 
