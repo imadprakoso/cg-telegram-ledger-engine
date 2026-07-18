@@ -101,6 +101,8 @@ const els = {
   btnApplyDateFilter: document.getElementById('btnApplyDateFilter'),
   btnResetDateFilter: document.getElementById('btnResetDateFilter'),
   dateFilterError: document.getElementById('dateFilterError'),
+  dateFilterInfo: document.getElementById('dateFilterInfo'),
+  dateFilterActiveIndicator: document.getElementById('dateFilterActiveIndicator'),
 };
 
 // Safe DOM helpers — prevent crashes when elements are absent after refactor
@@ -1628,7 +1630,7 @@ function normalizeMutationDate(dateStr) {
 function extractMutationDates() {
   const dates = new Set();
   state.mutations.forEach(m => {
-    const norm = normalizeMutationDate(m.tanggal);
+    const norm = normalizeMutationDate(m.tanggal_mutasi || m.tanggal || m.mutationDate || m.date);
     if (norm) {
       m.tanggalKey = norm; // Store normalized date for easier comparison later
       dates.add(norm);
@@ -1640,9 +1642,20 @@ function extractMutationDates() {
     els.singleDateSelect.innerHTML = '<option value="">-- Pilih Tanggal --</option>' + 
       state.availableMutationDates.map(d => `<option value="${d}">${formatDateKey(d)}</option>`).join('');
   }
-  
-  if (state.availableMutationDates.length > 0 && els.dateFilterCard) {
-    els.dateFilterCard.style.display = 'block';
+
+  if (state.availableMutationDates.length > 0) {
+    if (els.dateFilterInfo) {
+      const start = state.availableMutationDates[0];
+      const end = state.availableMutationDates[state.availableMutationDates.length - 1];
+      els.dateFilterInfo.innerHTML = `
+        <div style="margin-bottom: 4px;">Periode PDF terdeteksi: <strong style="color: var(--text-main);">${formatDateKey(start)} sampai ${formatDateKey(end)}</strong></div>
+        <div>Jumlah tanggal tersedia: <strong style="color: var(--text-main);">${state.availableMutationDates.length} hari</strong></div>
+      `;
+    }
+    
+    if (els.dateFilterCard) {
+      els.dateFilterCard.style.display = 'block';
+    }
   }
 }
 
@@ -1678,6 +1691,14 @@ function handleApplyDateFilter() {
   }
 
   state.reconDateFilter = filter;
+  
+  if (els.dateFilterActiveIndicator) {
+    els.dateFilterActiveIndicator.style.display = 'block';
+    if (mode === 'all') els.dateFilterActiveIndicator.textContent = 'Menampilkan semua tanggal';
+    if (mode === 'single') els.dateFilterActiveIndicator.textContent = `Menampilkan tanggal ${formatDateKey(filter.single)}`;
+    if (mode === 'range') els.dateFilterActiveIndicator.textContent = `Menampilkan ${formatDateKey(filter.rangeStart)} sampai ${formatDateKey(filter.rangeEnd)}`;
+  }
+
   reconcileTransactions();
   render();
 }
@@ -1695,6 +1716,10 @@ function handleResetDateFilter() {
   if (els.rangeStartDate) els.rangeStartDate.value = '';
   if (els.rangeEndDate) els.rangeEndDate.value = '';
   if (els.dateToleranceCheckbox) els.dateToleranceCheckbox.checked = false;
+  if (els.dateFilterActiveIndicator) {
+    els.dateFilterActiveIndicator.style.display = 'none';
+    els.dateFilterActiveIndicator.textContent = '';
+  }
 
   state.reconDateFilter = { mode: 'all', single: '', rangeStart: '', rangeEnd: '', tolerance: false };
   reconcileTransactions();
@@ -1762,12 +1787,13 @@ function processBCABlock(blockLines, parsedArray, currentId) {
     
     parsedArray.push({
       id: `mut-bca-pdf-${currentId}`,
-      tanggal: dateStr,
+      tanggal_mutasi: dateStr,
       keterangan: cleanText(descriptionLines.join(' ')),
       nominal: amountVal,
       nominal_keluar: isDebit ? amountVal : 0,
       nominal_masuk: isKredit ? amountVal : 0,
       saldo: balanceVal,
+      bank: 'BCA',
       no_rekening_tujuan: extractedAccount,
       nama_penerima: extractedName,
       sumber_pembacaan: 'bca_pdf',
@@ -1883,8 +1909,8 @@ async function parseMutationText(fullText, readingMethod) {
         });
 
         parsedMutations.push({
-          id: `mut-${readingMethod.toLowerCase().replace(/\s/g, '-')}-${currentId++}`,
-          tanggal: dateMatch ? dateMatch[1] : '',
+          id: `mut-manual-${Date.now()}-${currentId++}`,
+          tanggal_mutasi: dateMatch ? dateMatch[1] : '',
           keterangan: cleanText(ket),
           nominal: amountVal,
           nominal_keluar: isDebit ? amountVal : (isKredit ? 0 : amountVal), // Default to debit if ambiguous
@@ -2018,7 +2044,7 @@ function reconcileTransactions() {
       state.reconciliationResults.push({
         ...tx,
         tanggal_request: tx.tanggalLabel,
-        tanggal_mutasi: bestMatch.tanggal,
+        tanggal_mutasi: bestMatch.tanggal_mutasi,
         nominal_telegram: tx.nominal,
         nominal_mutasi: bestMatch.nominal_keluar,
         biaya_admin: biaya_admin,
@@ -2066,7 +2092,7 @@ function reconcileTransactions() {
 
     return {
       tanggal_request: '-',
-      tanggal_mutasi: m.tanggal,
+      tanggal_mutasi: m.tanggal_mutasi,
       vendor: '-',
       noRekening: '-',
       atasNama: '-',
@@ -2133,7 +2159,7 @@ function reconToRow(tx) {
 
 function mutToRow(m) {
   return {
-    'Tanggal Mutasi': m.tanggal || '-',
+    'Tanggal Mutasi': m.tanggal_mutasi || '-',
     'Keterangan Mutasi': m.keterangan || '-',
     'Debit / Keluar': m.nominal_keluar || 0,
     'Kredit / Masuk': m.nominal_masuk || 0,
@@ -2414,7 +2440,7 @@ function renderMutasiBank() {
   activeMutations.forEach(m => {
     html += `
       <tr>
-        <td style="white-space: nowrap;">${m.tanggal || '-'}</td>
+        <td style="white-space: nowrap;">${m.tanggal_mutasi || '-'}</td>
         <td>${m.keterangan || '-'}</td>
         <td class="text-right font-mono" style="color: var(--accent);">${m.nominal_keluar > 0 ? formatRupiah(m.nominal_keluar) : '-'}</td>
         <td class="text-right font-mono" style="color: var(--success);">${m.nominal_masuk > 0 ? formatRupiah(m.nominal_masuk) : '-'}</td>

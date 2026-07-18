@@ -120,7 +120,8 @@
             <div class="icon-bubble">📅</div>
             <div>
               <h2>Pilih Tanggal Rekonsiliasi</h2>
-              <p>Filter transaksi mutasi dan request Telegram berdasarkan tanggal.</p>
+              <p>Pilih tanggal atau rentang tanggal dari mutasi bank yang ingin diperiksa.</p>
+              <div id="dateFilterInfo" style="margin-top: 12px; font-size: 13px; color: var(--text-muted); font-weight: 500;"></div>
             </div>
           </div>
           <div class="upload-box" style="align-items: flex-start; gap: 16px;">
@@ -141,9 +142,17 @@
             </div>
 
             <div id="rangeDateContainer" style="display: none; width: 100%; gap: 12px; align-items: center; flex-wrap: wrap;">
-              <input type="date" id="rangeStartDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
-              <span style="font-size: 14px; font-weight: 500;">sampai</span>
-              <input type="date" id="rangeEndDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+              <div>
+                <div style="font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px;">Tanggal Mulai</div>
+                <input type="date" id="rangeStartDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+              </div>
+              <div style="margin-top: 18px;">
+                <span style="font-size: 14px; font-weight: 500; color: var(--text-muted);">sampai</span>
+              </div>
+              <div>
+                <div style="font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 4px;">Tanggal Selesai</div>
+                <input type="date" id="rangeEndDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+              </div>
             </div>
 
             <div style="width: 100%; margin-top: 4px;">
@@ -154,9 +163,10 @@
 
             <div style="display: flex; gap: 12px; width: 100%; margin-top: 8px;">
               <button id="btnApplyDateFilter" class="upload-button" style="padding: 10px 24px;">Terapkan Tanggal</button>
-              <button id="btnResetDateFilter" class="upload-button" style="padding: 10px 24px; background-color: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Reset Tanggal</button>
+              <button id="btnResetDateFilter" class="upload-button" style="padding: 10px 24px; background-color: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Reset Filter</button>
             </div>
             
+            <div id="dateFilterActiveIndicator" style="display: none; font-size: 13px; font-weight: 500; color: var(--accent); margin-top: 8px;"></div>
             <div id="dateFilterError" style="display: none; color: #ef4444; font-size: 13px; margin-top: 8px; font-weight: 500;"></div>
           </div>
         </section>
