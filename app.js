@@ -1282,16 +1282,25 @@ async function handleMutationChange(event) {
   const file = event.target.files?.[0];
   if (!file) return;
 
-  if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+  const validPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+  if (!validPdf) {
     els.mutationFileHint.textContent = 'File mutasi harus dalam format PDF.';
+    els.pdfReadStatus.textContent = 'File bukan PDF';
+    els.mutationParseStatus.textContent = 'Gagal';
     return;
   }
+
+  // Reset existing data
+  state.mutations = [];
+  state.reconciliationResults = [];
+  state.unmatchedMutations = [];
+  state.unmatchedTransactions = [];
 
   state.mutationFileName = file.name;
   els.mutationFileName.textContent = file.name;
   els.mutationFileHint.style.display = 'none';
   els.pdfReadStatus.textContent = 'Membaca PDF...';
-  els.mutationParseStatus.textContent = 'Belum Diparse';
+  els.mutationParseStatus.textContent = 'Menunggu hasil pembacaan...';
   
   if (els.mutationOcrProgress) {
     els.mutationOcrProgress.style.display = 'none';
@@ -1303,6 +1312,9 @@ async function handleMutationChange(event) {
   if (els.mutationInputLabel) {
     els.mutationInputLabel.style.display = 'inline-block';
   }
+  
+  // Render immediately to reflect empty states before processing
+  render();
 
   try {
     const arrayBuffer = await file.arrayBuffer();
@@ -1311,7 +1323,6 @@ async function handleMutationChange(event) {
     const pdf = await loadingTask.promise;
     
     let fullText = '';
-    let readingMethod = 'pdf_text';
     let reconstructedLines = [];
     
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -1330,31 +1341,36 @@ async function handleMutationChange(event) {
     }
 
     if (fullText.trim().length > 200) {
-      els.pdfReadStatus.textContent = `PDF Digital Terbaca (${pdf.numPages} halaman)`;
-      els.mutationParseStatus.textContent = 'Memproses transaksi BCA...';
+      els.pdfReadStatus.textContent = `PDF Digital Terbaca • ${pdf.numPages} halaman`;
+      els.mutationParseStatus.textContent = 'Memisahkan transaksi BCA...';
       await new Promise(resolve => setTimeout(resolve, 0)); // yield
       
       // Parse BCA format
       parseBCAMutationLines(reconstructedLines);
       
       if (state.mutations.length > 0) {
-        els.mutationParseStatus.textContent = `${state.mutations.length} transaksi mutasi berhasil diparse`;
-        reconcileTransactions();
-        render();
+        els.mutationParseStatus.textContent = `${state.mutations.filter(m => m.nominal_keluar > 0).length} transaksi keluar berhasil diparse`;
       } else {
-        els.mutationParseStatus.textContent = 'Teks PDF terbaca, tetapi format transaksi belum berhasil diparse';
+        els.mutationParseStatus.textContent = 'Teks PDF terbaca, tetapi transaksi belum berhasil diparse';
         if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
       }
     } else {
-      els.pdfReadStatus.textContent = 'PDF Scan / Tidak Ada Text Layer';
-      els.mutationParseStatus.textContent = 'Gagal memparse karena teks kosong';
+      els.pdfReadStatus.textContent = 'PDF Tidak Memiliki Text Layer';
+      els.mutationParseStatus.textContent = 'OCR Diperlukan';
       if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
     }
+    
+    reconcileTransactions();
+    render();
   } catch (error) {
-    console.error("PDF extraction failed:", error);
+    console.error("Gagal membaca PDF mutasi:", error);
     els.pdfReadStatus.textContent = 'Gagal Membuka PDF';
-    els.mutationParseStatus.textContent = 'Error pada file PDF.';
+    els.mutationParseStatus.textContent = error?.message || 'Terjadi kesalahan saat memproses PDF';
     if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
+    
+    state.mutations = [];
+    reconcileTransactions();
+    render();
   }
 }
 
@@ -1436,10 +1452,11 @@ function processBCABlock(blockLines, parsedArray, currentId) {
   const dateMatch = blockLines[0].match(/^(\d{2}\/\d{2}(?:\/\d{4})?)/);
   const dateStr = dateMatch ? dateMatch[1] : '';
   
-  // Look for the specific Amount DB/CR Balance pattern
-  // Group 1: Amount, Group 2: DB/CR, Group 3: Balance
-  const amountPattern = /((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})\s+(DB|CR)\s+((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})/;
+  // Look for the specific Branch Amount DB/CR Balance pattern
+  // Group 1: Branch, Group 2: Amount, Group 3: DB/CR, Group 4: Balance
+  const amountPattern = /\b(\d{4})\s+(\d{1,3}(?:,\d{3})*\.\d{2})\s+(DB|CR)\s+(\d{1,3}(?:,\d{3})*\.\d{2})\b/;
   
+  let branchStr = '';
   let amountStr = '';
   let typeStr = '';
   let balanceStr = '';
@@ -1448,9 +1465,10 @@ function processBCABlock(blockLines, parsedArray, currentId) {
   for (const line of blockLines) {
     const match = line.match(amountPattern);
     if (match) {
-      amountStr = match[1];
-      typeStr = match[2];
-      balanceStr = match[3];
+      branchStr = match[1];
+      amountStr = match[2];
+      typeStr = match[3];
+      balanceStr = match[4];
       
       // Remove the matching part from the line for the description
       const descPart = line.replace(match[0], '').trim();
@@ -1849,7 +1867,13 @@ function renderReconRow(tx) {
 
 function getReconTableHtml(rows, emptyTitle, emptyDesc) {
   if (!rows.length) {
-    return emptyState(emptyTitle, emptyDesc);
+    return `
+      <div class="reconciliation-empty">
+        <div class="empty-icon">📄</div>
+        <h3>${escapeHtml(emptyTitle)}</h3>
+        <p>${escapeHtml(emptyDesc)}</p>
+      </div>
+    `;
   }
   return `
     <div class="table-scroll">
@@ -1873,6 +1897,14 @@ function getReconTableHtml(rows, emptyTitle, emptyDesc) {
       </table>
     </div>
   `;
+}
+
+function calculateFinalStatus(telegramLoaded, mutationLoaded, totalRecons, anomalyCount) {
+  if (!telegramLoaded && !mutationLoaded) return "BELUM DIPROSES";
+  if (!telegramLoaded || !mutationLoaded) return "DATA BELUM LENGKAP";
+  if (totalRecons === 0) return "BELUM ADA DATA REKONSILIASI";
+  if (anomalyCount > 0) return "NOT BALANCED";
+  return "BALANCED";
 }
 
 function renderRekonsiliasiMutasi() {
@@ -1904,7 +1936,31 @@ function renderRekonsiliasiMutasi() {
   });
   
   const sumSelisih = sumMutasi - sumRequest - sumAdmin;
-  const isBalanced = sumSelisih === 0 && countTidakMatch === 0 && countBelum === 0 && countTanpaRequest === 0;
+  const anomalyCount = countTidakMatch + countBelum + countTanpaRequest;
+  
+  // Update main summary grid DOM
+  if (document.getElementById('statRequest')) document.getElementById('statRequest').textContent = formatRupiah(sumRequest);
+  if (document.getElementById('statMutasiKeluar')) document.getElementById('statMutasiKeluar').textContent = formatRupiah(sumMutasi);
+  if (document.getElementById('statCocok')) document.getElementById('statCocok').textContent = countMatch;
+  if (document.getElementById('statTidakMatch')) document.getElementById('statTidakMatch').textContent = countTidakMatch;
+  if (document.getElementById('statAdmin')) document.getElementById('statAdmin').textContent = formatRupiah(sumAdmin);
+  if (document.getElementById('statSelisihBersih')) document.getElementById('statSelisihBersih').innerHTML = selisihHtml(sumSelisih, true);
+
+  // Update Status Akhir Badge
+  const telegramLoaded = state.transactions.length > 0;
+  const mutationLoaded = state.mutations.length > 0;
+  const finalStatus = calculateFinalStatus(telegramLoaded, mutationLoaded, allRecons.length, anomalyCount);
+  
+  const badgeEl = document.getElementById('finalStatusBadge');
+  if (badgeEl) {
+    badgeEl.style.display = 'inline-flex';
+    badgeEl.textContent = finalStatus;
+    badgeEl.className = 'badge'; // reset
+    if (finalStatus === 'BALANCED') badgeEl.classList.add('green');
+    else if (finalStatus === 'NOT BALANCED') badgeEl.classList.add('red');
+    else if (finalStatus === 'DATA BELUM LENGKAP') badgeEl.classList.add('amber');
+    else badgeEl.classList.add('dark');
+  }
 
   let filtered = allRecons;
   const s = state.reconFilters.search.toLowerCase();
@@ -1924,39 +1980,16 @@ function renderRekonsiliasiMutasi() {
     filtered = filtered.filter(r => (r.status_rekonsiliasi || '').toUpperCase() === statusFilter.toUpperCase());
   }
 
-  const summaryHtml = `
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px;">
-      <div class="stat-card">
-        <div class="stat-label">Total Request</div>
-        <div class="stat-value">${formatRupiah(sumRequest)}</div>
+  const toolbarHtml = `
+    <div class="reconciliation-toolbar">
+      <div class="search-wrapper">
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input type="search" id="reconSearchInput" placeholder="Cari vendor, rekening, keterangan..." value="${escapeAttr(state.reconFilters.search)}">
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Total Mutasi Keluar</div>
-        <div class="stat-value">${formatRupiah(sumMutasi)}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Total Biaya Admin</div>
-        <div class="stat-value">${formatRupiah(sumAdmin)}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Selisih Bersih</div>
-        <div class="stat-value">${selisihHtml(sumSelisih, true)}</div>
-      </div>
-      <div class="stat-card" style="border: 2px solid ${isBalanced ? '#10b981' : '#ef4444'};">
-        <div class="stat-label">Status Akhir</div>
-        <div class="stat-value" style="color: ${isBalanced ? '#10b981' : '#ef4444'}">${isBalanced ? 'BALANCED' : 'NOT BALANCED'}</div>
-      </div>
-    </div>
-    
-    <div style="display: flex; gap: 16px; margin-bottom: 16px; align-items: center; flex-wrap: wrap;">
-      <div class="input-wrap" style="flex: 1; min-width: 250px; margin-bottom: 0;">
-        <svg class="input-icon" viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" style="position: absolute; left: 12px; top: 11px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-        <input type="text" id="reconSearchInput" placeholder="Cari vendor, rekening, keterangan..." value="${escapeAttr(state.reconFilters.search)}" style="width: 100%; padding: 10px 10px 10px 40px; border-radius: 6px; border: 1px solid #d1d5db;">
-      </div>
-      <div style="display: flex; gap: 8px; flex-wrap: wrap;" id="reconStatusFilters">
+      <div class="status-filters" id="reconStatusFilters">
         ${['Semua', 'Match', 'Match + Biaya Admin', 'Nominal Tidak Match', 'Belum Dibayar', 'Mutasi Tanpa Request', 'Perlu Dicek', 'Hanya Anomali'].map(opt => `
-          <button class="chip-filter ${statusFilter === opt ? 'active' : ''}" data-recon-status="${opt}" style="padding: 6px 12px; border-radius: 20px; border: 1px solid #e5e7eb; background: ${statusFilter === opt ? '#2563eb' : '#fff'}; color: ${statusFilter === opt ? '#fff' : '#4b5563'}; cursor: pointer; font-size: 13px;">
-            ${opt} 
+          <button class="code-chip ${statusFilter === opt ? 'active' : ''}" data-recon-status="${opt}" style="cursor: pointer; ${statusFilter === opt ? 'background: var(--black); color: white;' : ''}">
+            ${opt}
             ${opt === 'Match' ? `(${countMatch})` : ''}
             ${opt === 'Nominal Tidak Match' ? `(${countTidakMatch})` : ''}
             ${opt === 'Belum Dibayar' ? `(${countBelum})` : ''}
@@ -1967,7 +2000,21 @@ function renderRekonsiliasiMutasi() {
     </div>
   `;
 
-  els.tableHost.innerHTML = summaryHtml + getReconTableHtml(filtered, 'Belum ada data rekonsiliasi', 'Silakan tunggu proses atau upload file yang diperlukan.');
+  let emptyTitle = 'Belum ada data rekonsiliasi';
+  let emptyDesc = 'Upload Telegram dan PDF Mutasi Bank untuk memulai.';
+  
+  if (!telegramLoaded && mutationLoaded) {
+    emptyTitle = 'PDF mutasi sudah terbaca.';
+    emptyDesc = 'Upload Telegram Export untuk mulai mencocokkan transaksi.';
+  } else if (telegramLoaded && !mutationLoaded) {
+    emptyTitle = 'Data Telegram sudah terbaca.';
+    emptyDesc = 'Upload PDF Mutasi Bank untuk mulai mencocokkan transaksi.';
+  } else if (els.pdfReadStatus && els.pdfReadStatus.textContent.includes('Membaca PDF')) {
+    emptyTitle = 'Sedang membaca PDF mutasi...';
+    emptyDesc = els.pdfReadStatus.textContent;
+  }
+
+  els.tableHost.innerHTML = toolbarHtml + getReconTableHtml(filtered, emptyTitle, emptyDesc);
   
   // Attach listeners
   const searchEl = document.getElementById('reconSearchInput');
@@ -1975,11 +2022,15 @@ function renderRekonsiliasiMutasi() {
     searchEl.addEventListener('input', (e) => {
       state.reconFilters.search = e.target.value;
       renderRekonsiliasiMutasi();
-      document.getElementById('reconSearchInput').focus();
+      const el = document.getElementById('reconSearchInput');
+      if (el) {
+        el.focus();
+        el.selectionStart = el.selectionEnd = el.value.length;
+      }
     });
   }
 
-  const chips = document.querySelectorAll('#reconStatusFilters .chip-filter');
+  const chips = document.querySelectorAll('#reconStatusFilters button');
   chips.forEach(chip => {
     chip.addEventListener('click', (e) => {
       state.reconFilters.status = e.currentTarget.getAttribute('data-recon-status');

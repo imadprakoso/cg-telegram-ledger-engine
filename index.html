@@ -112,37 +112,26 @@
           </div>
         </section>
 
-        <section class="summary-grid" aria-label="Ringkasan">
+        <section class="summary-grid" aria-label="Ringkasan" id="mainSummaryGrid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
           <article class="summary-card">
-            <span>Total Transaksi</span>
-            <strong id="statTransaksi">0</strong>
+            <span>Total Request</span>
+            <strong id="statRequest">0</strong>
           </article>
-          <article class="summary-card">
-            <span>Total Pengeluaran</span>
-            <strong id="statPengeluaran">Rp 0</strong>
-          </article>
-          <article class="summary-card warning-card">
-            <span>Perlu Dicek</span>
-            <strong id="statPerluDicek">0</strong>
-          </article>
-          <article class="summary-card">
-            <span>Riwayat List</span>
-            <strong id="statRiwayat">0</strong>
-          </article>
-        </section>
-
-        <section class="summary-grid mutation-summary" id="mutationSummaryGrid" style="display: none;" aria-label="Ringkasan Mutasi">
           <article class="summary-card">
             <span>Total Mutasi Keluar</span>
-            <strong id="statMutasiKeluar">0</strong>
+            <strong id="statMutasiKeluar">Rp 0</strong>
           </article>
           <article class="summary-card">
-            <span>Total Cocok</span>
+            <span>Total Match</span>
             <strong id="statCocok">0</strong>
           </article>
           <article class="summary-card warning-card">
             <span>Total Tidak Match</span>
             <strong id="statTidakMatch">0</strong>
+          </article>
+          <article class="summary-card">
+            <span>Total Biaya Admin</span>
+            <strong id="statAdmin">Rp 0</strong>
           </article>
           <article class="summary-card">
             <span>Selisih Bersih</span>
@@ -156,7 +145,10 @@
               <p class="panel-kicker" id="panelKicker">Transaksi final</p>
               <h2 id="panelTitle">Data transaksi final</h2>
             </div>
-            <p id="panelInfo" class="panel-info">Upload file untuk mulai memproses data.</p>
+            <div style="display: flex; align-items: center; gap: 16px;">
+              <p id="panelInfo" class="panel-info">Upload file untuk mulai memproses data.</p>
+              <span id="finalStatusBadge" class="badge" style="display: none; font-size: 14px; padding: 8px 16px;">BELUM DIPROSES</span>
+            </div>
           </div>
 
           <div class="filter-toolbar" id="transactionFilters">

@@ -719,3 +719,77 @@ code {
     border-radius: 24px;
   }
 }
+
+/* RECONCILIATION UI */
+.reconciliation-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 24px;
+  border-top: 1px solid #e7e5e4;
+  border-bottom: 1px solid #e7e5e4;
+}
+
+.search-wrapper {
+  position: relative;
+  flex: 0 1 320px;
+}
+
+.search-wrapper input {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 16px 0 42px;
+  border: 1px solid #d6d3d1;
+  border-radius: 12px;
+}
+
+.search-icon {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: #78716c;
+}
+
+.status-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.reconciliation-table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.reconciliation-table {
+  width: 100%;
+  min-width: 1100px;
+  border-collapse: collapse;
+}
+
+.reconciliation-table th {
+  position: sticky;
+  top: 0;
+  background: #f5f5f4;
+  padding: 14px 16px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.reconciliation-table td {
+  padding: 14px 16px;
+  border-top: 1px solid #e7e5e4;
+  vertical-align: top;
+}
+
+.reconciliation-empty {
+  min-height: 240px;
+  display: grid;
+  place-items: center;
+  padding: 32px 20px;
+  text-align: center;
+}
