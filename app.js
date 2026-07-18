@@ -30,6 +30,14 @@ const state = {
     status: 'Semua',
     date: '',
     category: ''
+  },
+  availableMutationDates: [],
+  reconDateFilter: {
+    mode: 'all', // all, single, range
+    single: '',
+    rangeStart: '',
+    rangeEnd: '',
+    tolerance: false
   }
 };
 
@@ -61,6 +69,7 @@ const els = {
   fileName: document.getElementById('fileName'),
   fileHint: document.getElementById('fileHint'),
   exportBtn: document.getElementById('exportBtn'),
+  exportAllBtn: document.getElementById('exportAllBtn'),
   searchInput: document.getElementById('searchInput'),
   categoryFilter: document.getElementById('categoryFilter'),
   validationFilter: document.getElementById('validationFilter'),
@@ -81,6 +90,17 @@ const els = {
   mutationInputLabel: document.getElementById('mutationInputLabel'),
   pdfReadStatus: document.getElementById('pdfReadStatus'),
   mutationParseStatus: document.getElementById('mutationParseStatus'),
+  dateFilterCard: document.getElementById('dateFilterCard'),
+  dateModeRadios: document.getElementsByName('dateMode'),
+  singleDateContainer: document.getElementById('singleDateContainer'),
+  singleDateSelect: document.getElementById('singleDateSelect'),
+  rangeDateContainer: document.getElementById('rangeDateContainer'),
+  rangeStartDate: document.getElementById('rangeStartDate'),
+  rangeEndDate: document.getElementById('rangeEndDate'),
+  dateToleranceCheckbox: document.getElementById('dateToleranceCheckbox'),
+  btnApplyDateFilter: document.getElementById('btnApplyDateFilter'),
+  btnResetDateFilter: document.getElementById('btnResetDateFilter'),
+  dateFilterError: document.getElementById('dateFilterError'),
 };
 
 // Safe DOM helpers — prevent crashes when elements are absent after refactor
@@ -109,14 +129,38 @@ if (els.btnOcrCloud) {
 }
 if (els.btnPasteManual) {
   els.btnPasteManual.addEventListener('click', () => {
-    els.manualPasteCard.style.display = 'block';
-    els.manualPasteInput.focus();
+    if (els.manualPasteCard) els.manualPasteCard.style.display = 'block';
+    if (els.manualPasteInput) els.manualPasteInput.focus();
   });
 }
 if (els.btnParseManual) {
   els.btnParseManual.addEventListener('click', handleManualPasteParse);
 }
-els.exportBtn.addEventListener('click', exportWorkbook);
+
+// Date Filter Events
+if (els.dateModeRadios) {
+  els.dateModeRadios.forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      const mode = e.target.value;
+      if (els.singleDateContainer) els.singleDateContainer.style.display = mode === 'single' ? 'block' : 'none';
+      if (els.rangeDateContainer) els.rangeDateContainer.style.display = mode === 'range' ? 'flex' : 'none';
+      if (els.dateFilterError) els.dateFilterError.style.display = 'none';
+    });
+  });
+}
+
+if (els.btnApplyDateFilter) {
+  els.btnApplyDateFilter.addEventListener('click', handleApplyDateFilter);
+}
+
+if (els.btnResetDateFilter) {
+  els.btnResetDateFilter.addEventListener('click', handleResetDateFilter);
+}
+
+els.exportBtn.addEventListener('click', () => exportWorkbook(false));
+if (els.exportAllBtn) {
+  els.exportAllBtn.addEventListener('click', () => exportWorkbook(true));
+}
 els.searchInput.addEventListener('input', (e) => {
   state.filters.search = e.target.value;
   render();
@@ -1061,36 +1105,110 @@ function validationBadge(status) {
   return badge(status || 'Perlu Dicek', tone);
 }
 
-function exportWorkbook() {
+function exportWorkbook(exportAll = false) {
   if (!state.transactions.length) return;
-  const sheets = buildWorkbookSheets();
+  
+  // If exportAll, temporarily disable filter to calculate all reconciliations
+  let originalFilter = null;
+  if (exportAll && state.reconDateFilter.mode !== 'all') {
+    originalFilter = { ...state.reconDateFilter };
+    state.reconDateFilter = { mode: 'all', single: '', rangeStart: '', rangeEnd: '', tolerance: false };
+    reconcileTransactions();
+  }
+
+  const sheets = buildWorkbookSheets(exportAll);
   const xml = createExcelXml(sheets);
   const blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `CG-Telegram-Ledger-${new Date().toISOString().slice(0, 10)}.xls`;
+  
+  const filter = exportAll ? { mode: 'all' } : state.reconDateFilter;
+  let filenameSuffix = new Date().toISOString().slice(0, 10);
+  if (!exportAll && filter && filter.mode !== 'all') {
+    if (filter.mode === 'single' && filter.single) {
+      filenameSuffix = filter.single.replace(/\//g, '-');
+    } else if (filter.mode === 'range' && filter.rangeStart && filter.rangeEnd) {
+      filenameSuffix = `${filter.rangeStart.replace(/\//g, '-')}-sampai-${filter.rangeEnd.replace(/\//g, '-')}`;
+    }
+  }
+  
+  a.download = `CG-Ledger-Balance-${filenameSuffix}.xls`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(a.href);
+  
+  // Restore filter
+  if (originalFilter) {
+    state.reconDateFilter = originalFilter;
+    reconcileTransactions();
+  }
 }
 
-function buildWorkbookSheets() {
-  const txRows = state.transactions.map(txToRow);
-  const total = state.transactions.reduce((sum, tx) => sum + tx.nominal, 0);
-  const nonComplete = state.transactions.filter((tx) => tx.statusValidasi !== 'Lengkap').length;
+function buildWorkbookSheets(exportAll) {
+  const filter = state.reconDateFilter;
+  let activeTxs = [...state.transactions];
+  let activeMutations = [...state.mutations];
+  let filterLabel = 'Semua Tanggal';
+  
+  if (filter && filter.mode !== 'all') {
+    activeTxs = state.transactions.filter(tx => {
+      if (!tx.dateKey) return false;
+      if (filter.mode === 'single') return tx.dateKey === filter.single;
+      if (filter.mode === 'range') return tx.dateKey >= filter.rangeStart && tx.dateKey <= filter.rangeEnd;
+      return true;
+    });
+    activeMutations = state.mutations.filter(m => {
+      if (!m.tanggalKey) return false;
+      if (filter.mode === 'single') return m.tanggalKey === filter.single;
+      if (filter.mode === 'range') return m.tanggalKey >= filter.rangeStart && m.tanggalKey <= filter.rangeEnd;
+      return true;
+    });
+    if (filter.mode === 'single') filterLabel = formatDateKey(filter.single);
+    else if (filter.mode === 'range') filterLabel = `${formatDateKey(filter.rangeStart)} - ${formatDateKey(filter.rangeEnd)}`;
+  }
+
+  const txRows = activeTxs.map(txToRow);
+  const totalRequest = activeTxs.reduce((sum, tx) => sum + (tx.nominal || 0), 0);
+  const totalMutasiKeluar = activeMutations.reduce((sum, m) => sum + (m.nominal_keluar || 0), 0);
+  
+  const countMatch = state.reconciliationResults.filter(r => r.status_rekonsiliasi === 'MATCH' || r.status_rekonsiliasi === 'MATCH + BIAYA ADMIN').length;
+  const countSalahTransfer = state.unmatchedMutations.filter(r => r.status_rekonsiliasi === 'SALAH TRANSFER').length;
+  const countBelumAda = state.unmatchedTransactions.length;
+  const countMutasiTanpaRequest = state.unmatchedMutations.filter(r => r.status_rekonsiliasi === 'MUTASI TANPA REQUEST').length;
+  
+  const activeRecons = state.reconciliationResults;
+  const activeUnmatchedTxs = state.unmatchedTransactions;
+  const activeUnmatchedMuts = state.unmatchedMutations;
+  
+  const sumMutasi = activeRecons.reduce((s, r) => s + (r.nominal_mutasi || 0), 0) + activeUnmatchedMuts.reduce((s, r) => s + (r.nominal_mutasi || 0), 0);
+  const sumRequest = activeRecons.reduce((s, r) => s + (r.nominal_telegram || 0), 0) + activeUnmatchedTxs.reduce((s, r) => s + (r.nominal_telegram || 0), 0);
+  const sumAdmin = activeRecons.reduce((s, r) => s + (r.biaya_admin || 0), 0);
+  const isBalanced = (sumMutasi - sumRequest - sumAdmin) === 0 ? "BALANCED" : "NOT BALANCED";
 
   const sheets = [];
-  sheets.push({ name: 'Ringkasan', rows: [
+  sheets.push({ name: 'Summary', rows: [
+    ['Informasi Rekonsiliasi', ''],
+    ['Mode Filter', exportAll ? 'Semua Tanggal' : 'Tanggal Terpilih'],
+    ['Tanggal Terpilih', filterLabel],
+    ['', ''],
     ['Metrik', 'Nilai'],
-    ['Total Transaksi', state.transactions.length],
-    ['Total Pengeluaran', total],
-    ['Perlu Dicek', nonComplete],
-    ['Riwayat List', state.listHistory.length],
-    ['Tanggal Export', new Date().toLocaleString('id-ID')],
+    ['Jumlah Request', activeTxs.length],
+    ['Jumlah Mutasi DB', activeMutations.filter(m => m.nominal_keluar > 0).length],
+    ['Total Nominal List TF', totalRequest],
+    ['Total Nominal Mutasi Keluar', totalMutasiKeluar],
+    ['', ''],
+    ['Total Match', countMatch],
+    ['Total Salah Transfer', countSalahTransfer],
+    ['Belum Ada di Mutasi', countBelumAda],
+    ['Mutasi Tanpa Request', countMutasiTanpaRequest],
+    ['', ''],
+    ['Status', isBalanced],
+    ['Tanggal Export', new Date().toLocaleString('id-ID')]
   ] });
+  
   sheets.push({ name: 'Semua Transaksi Final', rows: objectRowsToSheet(txRows) });
-  sheets.push({ name: 'List Pemegang Rekening', rows: objectRowsToSheet(state.transactions.map((tx) => ({
+  sheets.push({ name: 'List Pemegang Rekening', rows: objectRowsToSheet(activeTxs.map((tx) => ({
     'No Rekening': tx.noRekening,
     'Vendor': tx.vendor,
     'Nominal': tx.nominal,
@@ -1100,33 +1218,33 @@ function buildWorkbookSheets() {
 
   ['Outsourcing', 'Membeli Bahan', 'Menambah Persediaan', 'Membeli Perlengkapan', 'Pembelian Aset', 'Biaya Operasional', 'Refund', 'Pettycash / Top Up / Mutasi Internal'].forEach((category) => {
     const name = category === 'Pettycash / Top Up / Mutasi Internal' ? 'Pettycash Top Up' : category;
-    sheets.push({ name, rows: objectRowsToSheet(state.transactions.filter((tx) => tx.kategori === category).map(txToRow)) });
+    sheets.push({ name, rows: objectRowsToSheet(activeTxs.filter((tx) => tx.kategori === category).map(txToRow)) });
   });
 
-  sheets.push({ name: 'Kurang Nota', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi === 'Kurang Nota').map(txToRow)) });
-  sheets.push({ name: 'Kurang Invoice', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi === 'Kurang Invoice').map(txToRow)) });
-  sheets.push({ name: 'Perlu Dicek', rows: objectRowsToSheet(state.transactions.filter((tx) => tx.statusValidasi !== 'Lengkap').map(txToRow)) });
+  sheets.push({ name: 'Kurang Nota', rows: objectRowsToSheet(activeTxs.filter((tx) => tx.statusValidasi === 'Kurang Nota').map(txToRow)) });
+  sheets.push({ name: 'Kurang Invoice', rows: objectRowsToSheet(activeTxs.filter((tx) => tx.statusValidasi === 'Kurang Invoice').map(txToRow)) });
+  sheets.push({ name: 'Perlu Dicek', rows: objectRowsToSheet(activeTxs.filter((tx) => tx.statusValidasi !== 'Lengkap').map(txToRow)) });
   
-  if (state.mutations.length > 0) {
-    sheets.push({ name: 'Mutasi Bank', rows: objectRowsToSheet(state.mutations.map(mutToRow)) });
+  if (activeMutations.length > 0) {
+    sheets.push({ name: 'Mutasi Bank', rows: objectRowsToSheet(activeMutations.map(mutToRow)) });
   }
 
-  if (state.reconciliationResults.length > 0) {
-    sheets.push({ name: 'Rekonsiliasi Mutasi', rows: objectRowsToSheet(state.reconciliationResults.map(reconToRow)) });
-    sheets.push({ name: 'Nominal Tidak Match', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.status_rekonsiliasi === 'Nominal Tidak Match').map(reconToRow)) });
-    sheets.push({ name: 'Selisih Lebih', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.selisih_nominal > 0).map(reconToRow)) });
-    sheets.push({ name: 'Selisih Kurang', rows: objectRowsToSheet(state.reconciliationResults.filter(r => r.selisih_nominal < 0).map(reconToRow)) });
+  if (activeRecons && activeRecons.length > 0) {
+    sheets.push({ name: 'Rekonsiliasi Mutasi', rows: objectRowsToSheet(activeRecons.map(reconToRow)) });
+    sheets.push({ name: 'Nominal Tidak Match', rows: objectRowsToSheet(activeRecons.filter(r => r.status_rekonsiliasi === 'NOMINAL TIDAK MATCH').map(reconToRow)) });
+    sheets.push({ name: 'Selisih Lebih', rows: objectRowsToSheet(activeRecons.filter(r => r.selisih_nominal > 0).map(reconToRow)) });
+    sheets.push({ name: 'Selisih Kurang', rows: objectRowsToSheet(activeRecons.filter(r => r.selisih_nominal < 0).map(reconToRow)) });
   }
-  if (state.unmatchedTransactions.length > 0) {
-    sheets.push({ name: 'Belum Ada di Mutasi', rows: objectRowsToSheet(state.unmatchedTransactions.map(reconToRow)) });
+  if (activeUnmatchedTxs && activeUnmatchedTxs.length > 0) {
+    sheets.push({ name: 'Belum Ada di Mutasi', rows: objectRowsToSheet(activeUnmatchedTxs.map(reconToRow)) });
   }
-  if (state.unmatchedMutations.length > 0) {
-    sheets.push({ name: 'Mutasi Tanpa Request', rows: objectRowsToSheet(state.unmatchedMutations.map(reconToRow)) });
+  if (activeUnmatchedMuts && activeUnmatchedMuts.length > 0) {
+    sheets.push({ name: 'Mutasi Tanpa Request', rows: objectRowsToSheet(activeUnmatchedMuts.map(reconToRow)) });
   }
 
   sheets.push({ name: 'Rekap Vendor', rows: objectRowsToSheet(aggregateVendorRecap()) });
-  sheets.push({ name: 'Rekap Rekening', rows: objectRowsToSheet(aggregateBy(state.transactions, 'noRekening')) });
-  sheets.push({ name: 'Rekap Kategori', rows: objectRowsToSheet(aggregateBy(state.transactions, 'kategori')) });
+  sheets.push({ name: 'Rekap Rekening', rows: objectRowsToSheet(aggregateBy(activeTxs, 'noRekening')) });
+  sheets.push({ name: 'Rekap Kategori', rows: objectRowsToSheet(aggregateBy(activeTxs, 'kategori')) });
   sheets.push({ name: 'Riwayat List Telegram', rows: objectRowsToSheet(state.listHistory.map((item) => ({
     'Tanggal List': formatDateKey(item.listDateKey) || item.listDateKey,
     'Jam': item.timeText,
@@ -1487,6 +1605,100 @@ function parseBCAMutationLines(lines) {
 
   state.rawMutationText = lines.join('\n');
   state.mutations = parsedMutations;
+  extractMutationDates();
+}
+
+function normalizeMutationDate(dateStr) {
+  if (!dateStr) return '';
+  // Try existing normalizer first (handles DD/MM/YYYY)
+  const norm = normalizeDateKey(dateStr);
+  if (norm) return norm;
+  
+  // Handle DD/MM format (assume current year if no year provided)
+  const match = dateStr.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (match) {
+    const dd = match[1].padStart(2, '0');
+    const mm = match[2].padStart(2, '0');
+    const currentYear = new Date().getFullYear();
+    return `${currentYear}-${mm}-${dd}`;
+  }
+  return '';
+}
+
+function extractMutationDates() {
+  const dates = new Set();
+  state.mutations.forEach(m => {
+    const norm = normalizeMutationDate(m.tanggal);
+    if (norm) {
+      m.tanggalKey = norm; // Store normalized date for easier comparison later
+      dates.add(norm);
+    }
+  });
+  state.availableMutationDates = Array.from(dates).sort();
+  
+  if (els.singleDateSelect) {
+    els.singleDateSelect.innerHTML = '<option value="">-- Pilih Tanggal --</option>' + 
+      state.availableMutationDates.map(d => `<option value="${d}">${formatDateKey(d)}</option>`).join('');
+  }
+  
+  if (state.availableMutationDates.length > 0 && els.dateFilterCard) {
+    els.dateFilterCard.style.display = 'block';
+  }
+}
+
+function handleApplyDateFilter() {
+  if (els.dateFilterError) els.dateFilterError.style.display = 'none';
+  let mode = 'all';
+  if (els.dateModeRadios) {
+    els.dateModeRadios.forEach(r => { if (r.checked) mode = r.value; });
+  }
+
+  const filter = {
+    mode: mode,
+    single: els.singleDateSelect?.value || '',
+    rangeStart: els.rangeStartDate?.value || '',
+    rangeEnd: els.rangeEndDate?.value || '',
+    tolerance: els.dateToleranceCheckbox?.checked || false
+  };
+
+  if (mode === 'single' && !filter.single) {
+    if (els.dateFilterError) { els.dateFilterError.textContent = 'Pilih satu tanggal terlebih dahulu.'; els.dateFilterError.style.display = 'block'; }
+    return;
+  }
+  
+  if (mode === 'range') {
+    if (!filter.rangeStart || !filter.rangeEnd) {
+      if (els.dateFilterError) { els.dateFilterError.textContent = 'Pilih tanggal mulai dan selesai.'; els.dateFilterError.style.display = 'block'; }
+      return;
+    }
+    if (filter.rangeStart > filter.rangeEnd) {
+      if (els.dateFilterError) { els.dateFilterError.textContent = 'Tanggal mulai tidak boleh lebih besar dari tanggal selesai.'; els.dateFilterError.style.display = 'block'; }
+      return;
+    }
+  }
+
+  state.reconDateFilter = filter;
+  reconcileTransactions();
+  render();
+}
+
+function handleResetDateFilter() {
+  if (els.dateFilterError) els.dateFilterError.style.display = 'none';
+  if (els.dateModeRadios) {
+    els.dateModeRadios.forEach(r => { 
+      if (r.value === 'all') r.checked = true; 
+    });
+  }
+  if (els.singleDateContainer) els.singleDateContainer.style.display = 'none';
+  if (els.rangeDateContainer) els.rangeDateContainer.style.display = 'none';
+  if (els.singleDateSelect) els.singleDateSelect.value = '';
+  if (els.rangeStartDate) els.rangeStartDate.value = '';
+  if (els.rangeEndDate) els.rangeEndDate.value = '';
+  if (els.dateToleranceCheckbox) els.dateToleranceCheckbox.checked = false;
+
+  state.reconDateFilter = { mode: 'all', single: '', rangeStart: '', rangeEnd: '', tolerance: false };
+  reconcileTransactions();
+  render();
 }
 
 function processBCABlock(blockLines, parsedArray, currentId) {
@@ -1691,6 +1903,7 @@ async function parseMutationText(fullText, readingMethod) {
 
   state.rawMutationText = fullText;
   state.mutations = parsedMutations;
+  extractMutationDates();
 }
 
 function reconcileTransactions() {
@@ -1698,8 +1911,38 @@ function reconcileTransactions() {
   state.unmatchedMutations = [];
   state.unmatchedTransactions = [];
 
-  const mutations = [...state.mutations];
-  const txs = [...state.transactions];
+  // Reset matched flag on all mutations first
+  state.mutations.forEach(m => m.matched = false);
+
+  const filter = state.reconDateFilter;
+  let activeMutations = [...state.mutations];
+  let activeTxs = [...state.transactions];
+
+  if (filter.mode !== 'all') {
+    activeMutations = state.mutations.filter(m => {
+      if (!m.tanggalKey) return false;
+      if (filter.mode === 'single') return m.tanggalKey === filter.single;
+      if (filter.mode === 'range') return m.tanggalKey >= filter.rangeStart && m.tanggalKey <= filter.rangeEnd;
+      return true;
+    });
+    activeTxs = state.transactions.filter(tx => {
+      if (!tx.dateKey) return false;
+      if (filter.mode === 'single') return tx.dateKey === filter.single;
+      if (filter.mode === 'range') return tx.dateKey >= filter.rangeStart && tx.dateKey <= filter.rangeEnd;
+      return true;
+    });
+  }
+
+  let candidateMutations = [...activeMutations];
+  if (filter.tolerance && filter.mode !== 'all') {
+    candidateMutations = state.mutations.filter(m => {
+      if (!m.tanggalKey) return false;
+      const tsM = new Date(m.tanggalKey).getTime();
+      const tsS = new Date(filter.mode === 'single' ? filter.single : filter.rangeStart).getTime() - 86400000;
+      const tsE = new Date(filter.mode === 'single' ? filter.single : filter.rangeEnd).getTime() + 86400000;
+      return tsM >= tsS && tsM <= tsE;
+    });
+  }
 
   let totalCocok = 0;
   let totalTidakMatch = 0;
@@ -1707,13 +1950,13 @@ function reconcileTransactions() {
 
   const adminFees = [2500, 3000, 5000, 6500, 7500, 10000, 12500, 15000];
 
-  txs.forEach(tx => {
+  activeTxs.forEach(tx => {
     // 1. Exact match on Nominal Keluar
-    const sameNominal = mutations.filter(m => !m.matched && m.nominal_keluar > 0 && m.nominal_keluar === tx.nominal);
+    const sameNominal = candidateMutations.filter(m => !m.matched && m.nominal_keluar > 0 && m.nominal_keluar === tx.nominal);
     // 2. Match with valid Admin Fee
-    const sameWithAdminFee = mutations.filter(m => !m.matched && m.nominal_keluar > 0 && adminFees.includes(m.nominal_keluar - tx.nominal));
+    const sameWithAdminFee = candidateMutations.filter(m => !m.matched && m.nominal_keluar > 0 && adminFees.includes(m.nominal_keluar - tx.nominal));
     // 3. Match by Description/Vendor
-    const sameDesc = mutations.filter(m => !m.matched && m.nominal_keluar > 0 && (m.keterangan.toLowerCase().includes(tx.vendor.toLowerCase()) || m.keterangan.toLowerCase().includes(tx.atasNama.toLowerCase())));
+    const sameDesc = candidateMutations.filter(m => !m.matched && m.nominal_keluar > 0 && (m.keterangan.toLowerCase().includes(tx.vendor.toLowerCase()) || m.keterangan.toLowerCase().includes(tx.atasNama.toLowerCase())));
 
     let bestMatch = null;
     let status = 'BELUM DIBAYAR';
@@ -1803,26 +2046,46 @@ function reconcileTransactions() {
     }
   });
 
-  state.unmatchedMutations = mutations.filter(m => !m.matched && m.nominal_keluar > 0).map(m => ({
-    tanggal_request: '-',
-    tanggal_mutasi: m.tanggal,
-    vendor: '-',
-    noRekening: '-',
-    atasNama: '-',
-    nominal_telegram: 0,
-    nominal_mutasi: m.nominal_keluar,
-    biaya_admin: 0,
-    selisih_nominal: m.nominal_keluar,
-    saldo_setelah_transaksi: m.saldo,
-    deskripsi: '-',
-    keterangan_mutasi: m.raw_text,
-    status_rekonsiliasi: 'MUTASI TANPA REQUEST',
-    catatan_rekonsiliasi: 'Mutasi keluar ini tidak ada request di Telegram',
-    kodeCG: [],
-    kodeOT: []
-  }));
+  state.unmatchedMutations = activeMutations.filter(m => !m.matched && m.nominal_keluar > 0).map(m => {
+    const isSalahTransfer = activeTxs.some(tx => tx.nominal === m.nominal_keluar);
+    let st = isSalahTransfer ? 'SALAH TRANSFER' : 'MUTASI TANPA REQUEST';
+    let cat = isSalahTransfer ? 'Nominal cocok dengan request lain tetapi kemungkinan salah transfer' : 'Mutasi keluar ini tidak ada request di Telegram';
 
-  if (els.statMutasiKeluar) els.statMutasiKeluar.textContent = state.mutations.length.toLocaleString('id-ID');
+    let rekening_tujuan = m.no_rekening_tujuan || '';
+    let nama_penerima = m.nama_penerima || '';
+    let keterangan_mutasi_display = '';
+    if (rekening_tujuan && nama_penerima) {
+      keterangan_mutasi_display = `${rekening_tujuan} - ${nama_penerima}`;
+    } else if (nama_penerima) {
+      keterangan_mutasi_display = nama_penerima;
+    } else if (rekening_tujuan) {
+      keterangan_mutasi_display = rekening_tujuan;
+    } else {
+      keterangan_mutasi_display = "Rekening/Penerima Tidak Terbaca";
+    }
+
+    return {
+      tanggal_request: '-',
+      tanggal_mutasi: m.tanggal,
+      vendor: '-',
+      noRekening: '-',
+      atasNama: '-',
+      nominal_telegram: 0,
+      nominal_mutasi: m.nominal_keluar,
+      biaya_admin: 0,
+      selisih_nominal: m.nominal_keluar,
+      saldo_setelah_transaksi: m.saldo,
+      deskripsi: '-',
+      keterangan_mutasi: keterangan_mutasi_display,
+      raw_keterangan_mutasi: m.raw_text,
+      status_rekonsiliasi: st,
+      catatan_rekonsiliasi: cat,
+      kodeCG: [],
+      kodeOT: []
+    };
+  });
+
+  if (els.statMutasiKeluar) els.statMutasiKeluar.textContent = activeMutations.filter(m => m.nominal_keluar > 0).length.toLocaleString('id-ID');
   if (els.statCocok) els.statCocok.textContent = totalCocok.toLocaleString('id-ID');
   if (els.statTidakMatch) els.statTidakMatch.textContent = totalTidakMatch.toLocaleString('id-ID');
   if (els.statSelisihBersih) {
@@ -1955,6 +2218,7 @@ function renderRekonsiliasiMutasi() {
   let countTidakMatch = 0;
   let countBelum = 0;
   let countTanpaRequest = 0;
+  let countSalahTransfer = 0;
 
   allRecons.forEach(r => {
     sumRequest += r.nominal_telegram || 0;
@@ -1969,17 +2233,22 @@ function renderRekonsiliasiMutasi() {
       countBelum++;
     } else if (r.status_rekonsiliasi === 'MUTASI TANPA REQUEST') {
       countTanpaRequest++;
+    } else if (r.status_rekonsiliasi === 'SALAH TRANSFER') {
+      countSalahTransfer++;
     }
   });
   
   const sumSelisih = sumMutasi - sumRequest - sumAdmin;
-  const anomalyCount = countTidakMatch + countBelum + countTanpaRequest;
+  const anomalyCount = countTidakMatch + countBelum + countTanpaRequest + countSalahTransfer;
   
   // Update main summary grid DOM
   if (document.getElementById('statRequest')) document.getElementById('statRequest').textContent = formatRupiah(sumRequest);
   if (document.getElementById('statMutasiKeluar')) document.getElementById('statMutasiKeluar').textContent = formatRupiah(sumMutasi);
   if (document.getElementById('statCocok')) document.getElementById('statCocok').textContent = countMatch;
   if (document.getElementById('statTidakMatch')) document.getElementById('statTidakMatch').textContent = countTidakMatch;
+  if (document.getElementById('statSalahTransfer')) document.getElementById('statSalahTransfer').textContent = countSalahTransfer;
+  if (document.getElementById('statBelumAdaMutasi')) document.getElementById('statBelumAdaMutasi').textContent = countBelum;
+  if (document.getElementById('statMutasiTanpaRequest')) document.getElementById('statMutasiTanpaRequest').textContent = countTanpaRequest;
   if (document.getElementById('statAdmin')) document.getElementById('statAdmin').textContent = formatRupiah(sumAdmin);
   if (document.getElementById('statSelisihBersih')) document.getElementById('statSelisihBersih').innerHTML = selisihHtml(sumSelisih, true);
 
@@ -2093,7 +2362,40 @@ function renderMutasiBank() {
     return;
   }
 
-  let html = `
+  const filter = state.reconDateFilter;
+  let activeMutations = [...state.mutations];
+  let filterInfoText = '';
+  
+  if (filter && filter.mode !== 'all') {
+    activeMutations = state.mutations.filter(m => {
+      if (!m.tanggalKey) return false;
+      if (filter.mode === 'single') return m.tanggalKey === filter.single;
+      if (filter.mode === 'range') return m.tanggalKey >= filter.rangeStart && m.tanggalKey <= filter.rangeEnd;
+      return true;
+    });
+    
+    if (filter.mode === 'single') {
+      filterInfoText = `Menampilkan transaksi tanggal ${formatDateKey(filter.single)}`;
+    } else if (filter.mode === 'range') {
+      filterInfoText = `Menampilkan transaksi ${formatDateKey(filter.rangeStart)} sampai ${formatDateKey(filter.rangeEnd)}`;
+    }
+  }
+
+  let html = '';
+  if (filterInfoText) {
+    html += `<div style="margin-bottom: 16px; font-weight: 500; color: var(--accent); display: flex; align-items: center; gap: 8px;">
+      <span class="icon-bubble" style="width: 24px; height: 24px; font-size: 12px; background: var(--surface-2);">ℹ️</span>
+      ${filterInfoText}
+    </div>`;
+  }
+
+  if (activeMutations.length === 0 && filterInfoText) {
+    html += emptyState('Tidak ada transaksi', 'Tidak ada mutasi yang sesuai dengan tanggal terpilih.');
+    els.tableHost.innerHTML = html;
+    return;
+  }
+
+  html += `
     <div class="table-container">
       <table class="data-table">
         <thead>
@@ -2109,7 +2411,7 @@ function renderMutasiBank() {
         <tbody>
   `;
 
-  state.mutations.forEach(m => {
+  activeMutations.forEach(m => {
     html += `
       <tr>
         <td style="white-space: nowrap;">${m.tanggal || '-'}</td>

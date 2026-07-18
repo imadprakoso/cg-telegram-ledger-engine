@@ -29,7 +29,10 @@
             <button class="tab-pill" data-tab="keyword">Master Keyword</button>
           </nav>
 
-          <button id="exportBtn" class="export-button" type="button" disabled>Export Excel Final</button>
+          <div style="display: flex; gap: 8px;">
+            <button id="exportAllBtn" class="export-button" type="button" disabled style="background: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Export Semua Tanggal</button>
+            <button id="exportBtn" class="export-button" type="button" disabled>Export Tanggal Terpilih</button>
+          </div>
         </header>
 
         <section class="hero-section">
@@ -112,6 +115,52 @@
           </div>
         </section>
 
+        <section class="upload-card" id="dateFilterCard" style="display: none; border-left: 4px solid var(--accent); margin-bottom: 24px;">
+          <div class="upload-copy">
+            <div class="icon-bubble">📅</div>
+            <div>
+              <h2>Pilih Tanggal Rekonsiliasi</h2>
+              <p>Filter transaksi mutasi dan request Telegram berdasarkan tanggal.</p>
+            </div>
+          </div>
+          <div class="upload-box" style="align-items: flex-start; gap: 16px;">
+            <div style="display: flex; gap: 16px; align-items: center; width: 100%; font-size: 14px; flex-wrap: wrap;">
+              <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 500;">
+                <input type="radio" name="dateMode" value="all" checked> Semua Tanggal
+              </label>
+              <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 500;">
+                <input type="radio" name="dateMode" value="single"> Satu Tanggal
+              </label>
+              <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-weight: 500;">
+                <input type="radio" name="dateMode" value="range"> Rentang Tanggal
+              </label>
+            </div>
+
+            <div id="singleDateContainer" style="display: none; width: 100%;">
+              <select id="singleDateSelect" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); width: 100%; max-width: 300px; font-size: 14px;"></select>
+            </div>
+
+            <div id="rangeDateContainer" style="display: none; width: 100%; gap: 12px; align-items: center; flex-wrap: wrap;">
+              <input type="date" id="rangeStartDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+              <span style="font-size: 14px; font-weight: 500;">sampai</span>
+              <input type="date" id="rangeEndDate" style="padding: 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 14px; font-family: inherit;">
+            </div>
+
+            <div style="width: 100%; margin-top: 4px;">
+              <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: var(--text-muted);">
+                <input type="checkbox" id="dateToleranceCheckbox"> Izinkan toleransi pencocokan mutasi (H-1 / H+1)
+              </label>
+            </div>
+
+            <div style="display: flex; gap: 12px; width: 100%; margin-top: 8px;">
+              <button id="btnApplyDateFilter" class="upload-button" style="padding: 10px 24px;">Terapkan Tanggal</button>
+              <button id="btnResetDateFilter" class="upload-button" style="padding: 10px 24px; background-color: var(--surface-2); color: var(--text-main); border: 1px solid var(--border);">Reset Tanggal</button>
+            </div>
+            
+            <div id="dateFilterError" style="display: none; color: #ef4444; font-size: 13px; margin-top: 8px; font-weight: 500;"></div>
+          </div>
+        </section>
+
         <section class="summary-grid" aria-label="Ringkasan" id="mainSummaryGrid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));">
           <article class="summary-card">
             <span>Total Request</span>
@@ -129,9 +178,17 @@
             <span>Total Tidak Match</span>
             <strong id="statTidakMatch">0</strong>
           </article>
-          <article class="summary-card">
-            <span>Total Biaya Admin</span>
-            <strong id="statAdmin">Rp 0</strong>
+          <article class="summary-card warning-card">
+            <span>Salah Transfer</span>
+            <strong id="statSalahTransfer">0</strong>
+          </article>
+          <article class="summary-card warning-card">
+            <span>Belum Ada Mutasi</span>
+            <strong id="statBelumAdaMutasi">0</strong>
+          </article>
+          <article class="summary-card warning-card">
+            <span>Mutasi Tanpa Request</span>
+            <strong id="statMutasiTanpaRequest">0</strong>
           </article>
           <article class="summary-card">
             <span>Selisih Bersih</span>
