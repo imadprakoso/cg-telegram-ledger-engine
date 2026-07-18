@@ -873,7 +873,7 @@ function buildWorkbookSheets() {
     sheets.push({ name: 'Mutasi Tanpa Request', rows: objectRowsToSheet(state.unmatchedMutations.map(reconToRow)) });
   }
 
-  sheets.push({ name: 'Rekap Vendor', rows: objectRowsToSheet(aggregateBy(state.transactions, 'vendor')) });
+  sheets.push({ name: 'Rekap Vendor', rows: objectRowsToSheet(aggregateVendorRecap()) });
   sheets.push({ name: 'Rekap Rekening', rows: objectRowsToSheet(aggregateBy(state.transactions, 'noRekening')) });
   sheets.push({ name: 'Rekap Kategori', rows: objectRowsToSheet(aggregateBy(state.transactions, 'kategori')) });
   sheets.push({ name: 'Riwayat List Telegram', rows: objectRowsToSheet(state.listHistory.map((item) => ({
@@ -941,6 +941,42 @@ function aggregateBy(rows, key) {
     item['Total Nominal'] += tx.nominal || 0;
   });
   return Array.from(map.values()).sort((a, b) => b['Total Nominal'] - a['Total Nominal']);
+}
+
+function aggregateVendorRecap() {
+  const map = new Map();
+  state.transactions.forEach((tx) => {
+    const vendor = tx.vendor || 'Kosong';
+    if (!map.has(vendor)) {
+      map.set(vendor, { 
+        'Vendor': vendor, 
+        'Jumlah Transaksi': 0, 
+        'Total Nominal List': 0,
+        'Total Mutasi Keluar': 0,
+        'Total Biaya Admin': 0,
+        'Selisih Vendor': 0
+      });
+    }
+    const item = map.get(vendor);
+    item['Jumlah Transaksi'] += 1;
+    item['Total Nominal List'] += tx.nominal || 0;
+  });
+
+  state.reconciliationResults.forEach((recon) => {
+    const vendor = recon.vendor || 'Kosong';
+    if (map.has(vendor)) {
+      const item = map.get(vendor);
+      item['Total Mutasi Keluar'] += recon.nominal_mutasi || 0;
+      item['Total Biaya Admin'] += recon.biaya_admin || 0;
+    }
+  });
+
+  const results = Array.from(map.values());
+  results.forEach(item => {
+    item['Selisih Vendor'] = item['Total Mutasi Keluar'] - item['Total Nominal List'] - item['Total Biaya Admin'];
+  });
+  
+  return results.sort((a, b) => b['Total Nominal List'] - a['Total Nominal List']);
 }
 
 function objectRowsToSheet(objects) {
@@ -1190,12 +1226,11 @@ async function parseMutationText(fullText, readingMethod) {
   let currentId = 1;
 
   for (const line of lines) {
-    const amountMatch = line.match(/(?:(?:Rp|IDR)\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,})/i);
+    const amountMatches = [...line.matchAll(/(?:(?:Rp|IDR)\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{2})?|\d{4,})/gi)];
     const dateMatch = line.match(/(\d{1,2}[\/\-\s.](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|\d{1,2})(?:[\/\-\s.]\d{2,4})?)/i);
     
-    if (amountMatch) {
-      const cleanAmountStr = amountMatch[1].replace(/[,.]00$/, '').replace(/[^0-9]/g, '');
-      const amountVal = parseFloat(cleanAmountStr);
+    if (amountMatches.length > 0) {
+      const amounts = amountMatches.map(m => parseFloat(m[1].replace(/[,.]\d{2}$/, '').replace(/[^0-9]/g, '')));
       const isDebit = /(db|debit|keluar|transfer|trsf|biaya|tarikan|payment|qris|e-banking|mbanking)/i.test(line);
       const isKredit = /(cr|kredit|masuk|setor)/i.test(line);
 
@@ -1204,15 +1239,23 @@ async function parseMutationText(fullText, readingMethod) {
         statusParse = 'Perlu Dicek';
       }
 
+      const amountVal = amounts[0];
+      const saldoVal = amounts.length > 1 ? amounts[amounts.length - 1] : 0;
+
       if (amountVal > 0) {
+        let ket = line.replace(dateMatch ? dateMatch[0] : '', '');
+        amountMatches.forEach(m => {
+          ket = ket.replace(m[0], '');
+        });
+
         parsedMutations.push({
           id: `mut-${readingMethod.toLowerCase().replace(/\s/g, '-')}-${currentId++}`,
           tanggal: dateMatch ? dateMatch[1] : '',
-          keterangan: cleanText(line.replace(amountMatch[0], '').replace(dateMatch ? dateMatch[0] : '', '')),
+          keterangan: cleanText(ket),
           nominal: amountVal,
           nominal_keluar: isDebit ? amountVal : (isKredit ? 0 : amountVal), // Default to debit if ambiguous
           nominal_masuk: isKredit ? amountVal : 0,
-          saldo: 0,
+          saldo: saldoVal,
           no_rekening_tujuan: '',
           nama_penerima: '',
           sumber_pembacaan: readingMethod,
@@ -1240,44 +1283,65 @@ function reconcileTransactions() {
   let totalTidakMatch = 0;
   let totalSelisihBersih = 0;
 
+  const adminFees = [2500, 3000, 5000, 6500, 7500, 10000, 12500, 15000];
+
   txs.forEach(tx => {
-    // 1. Cari kandidat by Nominal
-    const sameNominal = mutations.filter(m => !m.matched && m.nominal === tx.nominal);
-    
-    // 2. Cari by Deskripsi/Vendor
-    const sameDesc = mutations.filter(m => !m.matched && (m.keterangan.toLowerCase().includes(tx.vendor.toLowerCase()) || m.keterangan.toLowerCase().includes(tx.atasNama.toLowerCase())));
+    // 1. Exact match on Nominal Keluar
+    const sameNominal = mutations.filter(m => !m.matched && m.nominal_keluar > 0 && m.nominal_keluar === tx.nominal);
+    // 2. Match with valid Admin Fee
+    const sameWithAdminFee = mutations.filter(m => !m.matched && m.nominal_keluar > 0 && adminFees.includes(m.nominal_keluar - tx.nominal));
+    // 3. Match by Description/Vendor
+    const sameDesc = mutations.filter(m => !m.matched && m.nominal_keluar > 0 && (m.keterangan.toLowerCase().includes(tx.vendor.toLowerCase()) || m.keterangan.toLowerCase().includes(tx.atasNama.toLowerCase())));
 
     let bestMatch = null;
-    let status = 'Belum Ada di Mutasi';
+    let status = 'BELUM DIBAYAR';
     let selisih = 0;
+    let biaya_admin = 0;
 
     if (sameNominal.length > 0) {
-      bestMatch = sameNominal[0]; // Ambil yang pertama (bisa dikembangkan cek tanggal)
-      status = 'Cocok';
+      bestMatch = sameNominal[0];
+    } else if (sameWithAdminFee.length > 0) {
+      bestMatch = sameWithAdminFee[0];
     } else if (sameDesc.length > 0) {
       bestMatch = sameDesc[0];
-      status = 'Nominal Tidak Match';
-      selisih = bestMatch.nominal - tx.nominal;
     }
 
     if (bestMatch) {
       bestMatch.matched = true;
-      if (status === 'Cocok') totalCocok++;
-      if (status === 'Nominal Tidak Match') {
+      selisih = bestMatch.nominal_keluar - tx.nominal;
+
+      if (selisih === 0) {
+        status = 'MATCH';
+        biaya_admin = 0;
+        totalCocok++;
+      } else if (selisih > 0 && adminFees.includes(selisih)) {
+        status = 'MATCH + BIAYA ADMIN';
+        biaya_admin = selisih;
+        totalCocok++;
+      } else {
+        status = 'NOMINAL TIDAK MATCH';
+        biaya_admin = 0;
         totalTidakMatch++;
         totalSelisihBersih += selisih;
       }
+
+      let catatan = '';
+      if (status === 'MATCH') catatan = 'Nominal cocok';
+      else if (status === 'MATCH + BIAYA ADMIN') catatan = `Cocok dengan biaya admin ${formatRupiah(selisih)}`;
+      else catatan = selisih > 0 ? `Mutasi lebih besar dari request Telegram sebesar ${formatRupiah(selisih)}` : (selisih < 0 ? `Mutasi lebih kecil dari request Telegram sebesar ${formatRupiah(Math.abs(selisih))}` : 'Nominal cocok');
 
       state.reconciliationResults.push({
         ...tx,
         tanggal_request: tx.tanggalLabel,
         tanggal_mutasi: bestMatch.tanggal,
         nominal_telegram: tx.nominal,
-        nominal_mutasi: bestMatch.nominal,
+        nominal_mutasi: bestMatch.nominal_keluar,
+        biaya_admin: biaya_admin,
         selisih_nominal: selisih,
-        keterangan_mutasi: bestMatch.keterangan,
+        saldo_setelah_transaksi: bestMatch.saldo,
+        keterangan_mutasi: bestMatch.raw_text,
         status_rekonsiliasi: status,
-        catatan_rekonsiliasi: selisih > 0 ? `Mutasi lebih besar dari request Telegram sebesar ${formatRupiah(selisih)}` : (selisih < 0 ? `Mutasi lebih kecil dari request Telegram sebesar ${formatRupiah(Math.abs(selisih))}` : 'Nominal cocok')
+        catatan_rekonsiliasi: catatan
       });
     } else {
       state.unmatchedTransactions.push({
@@ -1286,26 +1350,30 @@ function reconcileTransactions() {
         tanggal_mutasi: '-',
         nominal_telegram: tx.nominal,
         nominal_mutasi: 0,
+        biaya_admin: 0,
         selisih_nominal: -tx.nominal,
+        saldo_setelah_transaksi: 0,
         keterangan_mutasi: '-',
-        status_rekonsiliasi: 'Belum Ada di Mutasi',
+        status_rekonsiliasi: 'BELUM DIBAYAR',
         catatan_rekonsiliasi: 'Belum ada transaksi di mutasi bank yang cocok'
       });
     }
   });
 
-  state.unmatchedMutations = mutations.filter(m => !m.matched).map(m => ({
+  state.unmatchedMutations = mutations.filter(m => !m.matched && m.nominal_keluar > 0).map(m => ({
     tanggal_request: '-',
     tanggal_mutasi: m.tanggal,
     vendor: '-',
     noRekening: '-',
     atasNama: '-',
     nominal_telegram: 0,
-    nominal_mutasi: m.nominal,
-    selisih_nominal: m.nominal,
+    nominal_mutasi: m.nominal_keluar,
+    biaya_admin: 0,
+    selisih_nominal: m.nominal_keluar,
+    saldo_setelah_transaksi: m.saldo,
     deskripsi: '-',
-    keterangan_mutasi: m.keterangan,
-    status_rekonsiliasi: 'Mutasi Tanpa Request',
+    keterangan_mutasi: m.raw_text,
+    status_rekonsiliasi: 'MUTASI TANPA REQUEST',
     catatan_rekonsiliasi: 'Mutasi keluar ini tidak ada request di Telegram',
     kodeCG: [],
     kodeOT: []
@@ -1327,33 +1395,33 @@ function selisihHtml(val, noColor = false) {
 
 function reconBadge(status) {
   const tones = {
-    'Cocok': 'green',
-    'Kemungkinan Cocok': 'blue',
-    'Nominal Tidak Match': 'red',
-    'Belum Ada di Mutasi': 'amber',
-    'Mutasi Tanpa Request': 'dark',
-    'Duplikat Kandidat': 'purple'
+    'MATCH': 'green',
+    'MATCH + BIAYA ADMIN': 'blue',
+    'NOMINAL TIDAK MATCH': 'red',
+    'BELUM DIBAYAR': 'amber',
+    'MUTASI TANPA REQUEST': 'dark',
+    'PERLU DICEK': 'orange'
   };
   return badge(status, tones[status] || '');
 }
 
 function reconToRow(tx) {
-  const selisihPct = tx.nominal_telegram ? ((tx.selisih_nominal / tx.nominal_telegram) * 100).toFixed(2) + '%' : '0%';
   return {
     'Tanggal Request': tx.tanggal_request || '-',
     'Tanggal Mutasi': tx.tanggal_mutasi || '-',
     'Vendor': tx.vendor || '-',
     'No Rekening': tx.noRekening || '-',
     'Atas Nama': tx.atasNama || '-',
-    'Nominal Telegram': tx.nominal_telegram || 0,
-    'Nominal Mutasi': tx.nominal_mutasi || 0,
-    'Selisih': tx.selisih_nominal || 0,
-    'Selisih %': selisihPct,
-    'Status Rekonsiliasi': tx.status_rekonsiliasi || '-',
-    'Kode CG': (tx.kodeCG || []).join('; '),
-    'Deskripsi Barang': tx.deskripsi || '-',
+    'Deskripsi List': tx.deskripsi || '-',
     'Keterangan Mutasi': tx.keterangan_mutasi || '-',
-    'Catatan Rekonsiliasi': tx.catatan_rekonsiliasi || '-'
+    'Nominal List TF': tx.nominal_telegram || 0,
+    'Nominal Mutasi Keluar': tx.nominal_mutasi || 0,
+    'Biaya Admin': tx.biaya_admin || 0,
+    'Total Uang Keluar Bank': tx.nominal_mutasi || 0,
+    'Saldo Setelah Transaksi': tx.saldo_setelah_transaksi || 0,
+    'Selisih': tx.selisih_nominal || 0,
+    'Status Rekonsiliasi': tx.status_rekonsiliasi || '-',
+    'Catatan Sistem': tx.catatan_rekonsiliasi || '-'
   };
 }
 
@@ -1373,32 +1441,22 @@ function mutToRow(m) {
 }
 
 function renderReconRow(tx) {
-  const codes = (tx.kodeCG || []).length ? tx.kodeCG : ['-'];
   return `
     <tr>
-      <td>
-        <div class="cell-main">${escapeHtml(tx.tanggal_request)}</div>
-        <div class="cell-sub">Mutasi: ${escapeHtml(tx.tanggal_mutasi)}</div>
-      </td>
-      <td>
-        <div class="cell-main">${escapeHtml(tx.vendor)}</div>
-        <div class="cell-sub">a.n ${escapeHtml(tx.atasNama)}</div>
-        <div class="cell-sub">${escapeHtml(tx.noRekening)}</div>
-      </td>
-      <td class="money-cell">
-        <div class="cell-main">${formatRupiah(tx.nominal_telegram)}</div>
-        <div class="cell-sub">Mut: ${formatRupiah(tx.nominal_mutasi)}</div>
-      </td>
-      <td class="money-cell">
-        ${selisihHtml(tx.selisih_nominal)}
-      </td>
-      <td class="desc-cell">
-        <div class="desc-text">${escapeHtml(tx.deskripsi)}</div>
-        <div class="cell-sub">Keterangan Mutasi: ${escapeHtml(tx.keterangan_mutasi)}</div>
-        <div class="cell-sub">${escapeHtml(tx.catatan_rekonsiliasi)}</div>
-        <div class="chip-wrap">${codes.map((code) => `<span class="code-chip">${escapeHtml(code)}</span>`).join('')}</div>
-      </td>
+      <td>${escapeHtml(tx.tanggal_request)}</td>
+      <td>${escapeHtml(tx.tanggal_mutasi)}</td>
+      <td>${escapeHtml(tx.vendor)}</td>
+      <td>${escapeHtml(tx.noRekening)}</td>
+      <td>${escapeHtml(tx.atasNama)}</td>
+      <td class="desc-text">${escapeHtml(tx.deskripsi)}</td>
+      <td class="desc-text">${escapeHtml(tx.keterangan_mutasi)}</td>
+      <td class="money-cell">${formatRupiah(tx.nominal_telegram)}</td>
+      <td class="money-cell">${formatRupiah(tx.nominal_mutasi)}</td>
+      <td class="money-cell">${formatRupiah(tx.biaya_admin)}</td>
+      <td class="money-cell">${formatRupiah(tx.saldo_setelah_transaksi)}</td>
+      <td class="money-cell">${selisihHtml(tx.selisih_nominal)}</td>
       <td>${reconBadge(tx.status_rekonsiliasi)}</td>
+      <td class="desc-text">${escapeHtml(tx.catatan_rekonsiliasi)}</td>
     </tr>
   `;
 }
@@ -1410,15 +1468,23 @@ function renderReconTable(rows, emptyTitle, emptyDesc) {
   }
   els.tableHost.innerHTML = `
     <div class="table-scroll">
-      <table class="ledger-table">
+      <table class="ledger-table" style="min-width: 1800px;">
         <thead>
           <tr>
-            <th style="width: 140px;">Tanggal</th>
-            <th style="width: 180px;">Vendor & Rekening</th>
-            <th style="width: 140px;">Nominal</th>
-            <th style="width: 120px;">Selisih</th>
-            <th>Deskripsi & Keterangan</th>
-            <th style="width: 150px;">Status</th>
+            <th>Tgl Request</th>
+            <th>Tgl Mutasi</th>
+            <th>Vendor</th>
+            <th>No Rekening</th>
+            <th>Atas Nama</th>
+            <th>Deskripsi List</th>
+            <th>Keterangan Mutasi</th>
+            <th>Nominal List TF</th>
+            <th>Nominal Mutasi Keluar</th>
+            <th>Biaya Admin</th>
+            <th>Saldo</th>
+            <th>Selisih</th>
+            <th>Status</th>
+            <th>Catatan Sistem</th>
           </tr>
         </thead>
         <tbody>
@@ -1426,6 +1492,7 @@ function renderReconTable(rows, emptyTitle, emptyDesc) {
         </tbody>
       </table>
     </div>
+
   `;
 }
 function renderMutasiBank() {
