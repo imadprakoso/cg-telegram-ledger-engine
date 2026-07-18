@@ -69,18 +69,8 @@ const els = {
   panelKicker: document.getElementById('panelKicker'),
   panelTitle: document.getElementById('panelTitle'),
   panelInfo: document.getElementById('panelInfo'),
-  statTransaksi: document.getElementById('statTransaksi'),
-  statPengeluaran: document.getElementById('statPengeluaran'),
-  statPerluDicek: document.getElementById('statPerluDicek'),
-  statRiwayat: document.getElementById('statRiwayat'),
   mutationInput: document.getElementById('mutationInput'),
   mutationFileName: document.getElementById('mutationFileName'),
-  mutationFileHint: document.getElementById('mutationFileHint'),
-  mutationSummaryGrid: document.getElementById('mutationSummaryGrid'),
-  statMutasiKeluar: document.getElementById('statMutasiKeluar'),
-  statCocok: document.getElementById('statCocok'),
-  statTidakMatch: document.getElementById('statTidakMatch'),
-  statSelisihBersih: document.getElementById('statSelisihBersih'),
   mutationOcrProgress: document.getElementById('mutationOcrProgress'),
   mutationFallbackActions: document.getElementById('mutationFallbackActions'),
   btnOcrCloud: document.getElementById('btnOcrCloud'),
@@ -92,6 +82,23 @@ const els = {
   pdfReadStatus: document.getElementById('pdfReadStatus'),
   mutationParseStatus: document.getElementById('mutationParseStatus'),
 };
+
+// Safe DOM helpers — prevent crashes when elements are absent after refactor
+function setElText(id, value) {
+  const el = typeof id === 'string' ? document.getElementById(id) : id;
+  if (el) el.textContent = value;
+  else console.warn(`[DOM] Element not found: #${id}`);
+}
+function setElHtml(id, value) {
+  const el = typeof id === 'string' ? document.getElementById(id) : id;
+  if (el) el.innerHTML = value;
+  else console.warn(`[DOM] Element not found: #${id}`);
+}
+function setElDisplay(id, value) {
+  const el = typeof id === 'string' ? document.getElementById(id) : id;
+  if (el) el.style.display = value;
+  else console.warn(`[DOM] Element not found: #${id}`);
+}
 
 els.fileInput.addEventListener('change', handleFileChange);
 if (els.mutationInput) {
@@ -164,43 +171,84 @@ async function handleFileChange(event) {
   if (!file) return;
 
   state.fileName = file.name;
-  els.fileName.textContent = file.name;
-  els.fileHint.textContent = 'Membaca dan memproses file Telegram...';
+  if (els.fileName) els.fileName.textContent = file.name;
+  if (els.fileHint) els.fileHint.textContent = 'Membaca dan memproses file Telegram...';
   
   state.photos.clear();
   state.unmatchedPhotos = [];
 
+  const fileName = file.name.toLowerCase();
+  let html = '';
+  let sourceType = 'html';
+  let photoCount = 0;
+
+  // --- Phase 1: Read file ---
   try {
-    let html = '';
-    if (file.name.toLowerCase().endsWith('.zip')) {
-      els.fileHint.textContent = 'Mengekstrak ZIP Telegram Export...';
+    if (fileName.endsWith('.zip')) {
+      sourceType = 'zip';
+      if (els.fileHint) els.fileHint.textContent = 'Mengekstrak ZIP Telegram Export...';
       const zip = await JSZip.loadAsync(file);
       
-      const htmlFile = Object.values(zip.files).find(f => f.name.endsWith('messages.html'));
-      if (!htmlFile) throw new Error("Tidak menemukan messages.html di dalam ZIP.");
-      html = await htmlFile.async('text');
+      // Recursive search for messages.html
+      const htmlEntry = Object.values(zip.files).find(entry => {
+        const normalized = entry.name.toLowerCase().replace(/\\/g, '/');
+        return !entry.dir && (normalized === 'messages.html' || normalized.endsWith('/messages.html'));
+      });
+      if (!htmlEntry) throw new Error('ZIP tidak berisi messages.html');
+      html = await htmlEntry.async('text');
 
-      const photoFiles = Object.values(zip.files).filter(f => !f.dir && f.name.includes('photos/'));
+      // Extract photos
+      const photoFiles = Object.values(zip.files).filter(f => !f.dir && /\/photos\/|^photos\//.test(f.name.replace(/\\/g, '/')));
       for (const photoFile of photoFiles) {
         const blob = await photoFile.async('blob');
         const url = URL.createObjectURL(blob);
-        // store by relative path like "photos/photo_1.jpg"
-        const pathMatch = photoFile.name.match(/(photos\/.*)$/i);
+        const pathMatch = photoFile.name.replace(/\\/g, '/').match(/(photos\/.+)$/i);
         const relativePath = pathMatch ? pathMatch[1] : photoFile.name;
         state.photos.set(relativePath, url);
       }
-    } else {
+      photoCount = state.photos.size;
+    } else if (fileName.endsWith('.html')) {
+      sourceType = 'html';
       html = await file.text();
+    } else {
+      throw new Error('File harus berupa messages.html atau ZIP Telegram Export.');
     }
+  } catch (error) {
+    console.error('Telegram file read failed:', error);
+    if (els.fileHint) els.fileHint.textContent = `Gagal membaca file: ${error.message}`;
+    return;
+  }
 
-    els.fileHint.textContent = 'Memparsing HTML chat Telegram...';
+  // --- Phase 2: Parse HTML ---
+  try {
+    if (els.fileHint) els.fileHint.textContent = 'Memparsing HTML chat Telegram...';
     parseTelegramHtml(html);
-    els.fileHint.textContent = `${state.transactions.length} transaksi final ditemukan dari ${state.listHistory.length} riwayat List TF. ${state.photos.size ? `(${state.photos.size} foto ter-load)` : '(Tanpa foto)'}`;
-    els.exportBtn.disabled = state.transactions.length === 0;
+  } catch (error) {
+    console.error('Telegram parsing failed:', error);
+    if (els.fileHint) els.fileHint.textContent = 'Gagal membaca isi file Telegram.';
+    return;
+  }
+
+  // --- Phase 3: Update UI ---
+  try {
+    const txCount = state.transactions.length;
+    const listCount = state.listHistory.length;
+    let statusMsg = '';
+    if (sourceType === 'zip') {
+      statusMsg = `ZIP Telegram berhasil dibaca. ${txCount} transaksi dari ${listCount} list TF.`;
+      if (photoCount > 0) statusMsg += ` ${photoCount} foto tersedia.`;
+      else statusMsg += ' Folder photos tidak ditemukan.';
+    } else {
+      statusMsg = `HTML Telegram berhasil dibaca. ${txCount} transaksi dari ${listCount} list TF. Foto tidak tersedia pada mode HTML.`;
+    }
+    if (els.fileHint) els.fileHint.textContent = statusMsg;
+    if (els.exportBtn) els.exportBtn.disabled = txCount === 0;
     render();
   } catch (error) {
-    console.error(error);
-    els.fileHint.textContent = 'Gagal membaca file. Pastikan file adalah messages.html atau ZIP hasil export Telegram.';
+    console.error('Telegram UI rendering failed:', error);
+    if (els.fileHint) els.fileHint.textContent = `Data berhasil dibaca (${state.transactions.length} transaksi), tetapi tampilan gagal diperbarui: ${error.message}`;
+    // Still try to export even if render failed
+    if (els.exportBtn) els.exportBtn.disabled = state.transactions.length === 0;
   }
 }
 
@@ -695,60 +743,56 @@ function filterTransactions(rows) {
 }
 
 function renderStats() {
-  els.statTransaksi.textContent = state.transactions.length.toLocaleString('id-ID');
-  els.statPengeluaran.textContent = formatRupiah(state.transactions.reduce((sum, tx) => sum + (tx.nominal || 0), 0));
-  els.statPerluDicek.textContent = state.transactions.filter((tx) => tx.statusValidasi !== 'Lengkap').length.toLocaleString('id-ID');
-  els.statRiwayat.textContent = state.listHistory.length.toLocaleString('id-ID');
+  // These IDs were removed from index.html in the refactor; use safe helpers
+  setElText('statTransaksi', state.transactions.length.toLocaleString('id-ID'));
+  setElText('statPengeluaran', formatRupiah(state.transactions.reduce((sum, tx) => sum + (tx.nominal || 0), 0)));
+  setElText('statPerluDicek', state.transactions.filter((tx) => tx.statusValidasi !== 'Lengkap').length.toLocaleString('id-ID'));
+  setElText('statRiwayat', state.listHistory.length.toLocaleString('id-ID'));
 }
 
 function renderPanel() {
-  els.transactionFilters.style.display = state.activeTab === 'transaksi' ? 'grid' : 'none';
-  
-  if (['rekonsiliasi', 'mutasi'].includes(state.activeTab)) {
-    els.mutationSummaryGrid.style.display = 'grid';
-  } else {
-    els.mutationSummaryGrid.style.display = 'none';
-  }
+  if (els.transactionFilters) els.transactionFilters.style.display = state.activeTab === 'transaksi' ? 'grid' : 'none';
+  // mutationSummaryGrid was removed from index.html; skip gracefully
 
   if (state.activeTab === 'transaksi') {
-    els.panelKicker.textContent = 'Transaksi final';
-    els.panelTitle.textContent = 'Data transaksi final';
-    els.panelInfo.textContent = `${state.filteredTransactions.length} dari ${state.transactions.length} transaksi tampil.`;
+    if (els.panelKicker) els.panelKicker.textContent = 'Transaksi final';
+    if (els.panelTitle) els.panelTitle.textContent = 'Data transaksi final';
+    if (els.panelInfo) els.panelInfo.textContent = `${state.filteredTransactions.length} dari ${state.transactions.length} transaksi tampil.`;
     renderTransactionTable();
   } else if (state.activeTab === 'mutasi') {
-    els.panelKicker.textContent = 'Mutasi Bank';
-    els.panelTitle.textContent = 'Data hasil ekstraksi mutasi bank';
-    els.panelInfo.textContent = `${state.mutations.length} transaksi mutasi ditemukan.`;
+    if (els.panelKicker) els.panelKicker.textContent = 'Mutasi Bank';
+    if (els.panelTitle) els.panelTitle.textContent = 'Data hasil ekstraksi mutasi bank';
+    if (els.panelInfo) els.panelInfo.textContent = `${state.mutations.length} transaksi mutasi ditemukan.`;
     renderMutasiBank();
   } else if (state.activeTab === 'rekonsiliasi') {
-    els.panelKicker.textContent = 'Rekonsiliasi Mutasi';
-    els.panelTitle.textContent = 'Hasil pencocokan mutasi dengan Telegram';
-    els.panelInfo.textContent = `Menampilkan semua mutasi dan transaksi.`;
+    if (els.panelKicker) els.panelKicker.textContent = 'Rekonsiliasi Mutasi';
+    if (els.panelTitle) els.panelTitle.textContent = 'Hasil pencocokan mutasi dengan Telegram';
+    if (els.panelInfo) els.panelInfo.textContent = `Menampilkan semua mutasi dan transaksi.`;
     renderRekonsiliasiMutasi();
   } else if (state.activeTab === 'riwayat') {
-    els.panelKicker.textContent = 'Riwayat List TF';
-    els.panelTitle.textContent = 'Riwayat list Telegram';
-    els.panelInfo.textContent = 'List terbaru per tanggal ditandai sebagai Final.';
+    if (els.panelKicker) els.panelKicker.textContent = 'Riwayat List TF';
+    if (els.panelTitle) els.panelTitle.textContent = 'Riwayat list Telegram';
+    if (els.panelInfo) els.panelInfo.textContent = 'List terbaru per tanggal ditandai sebagai Final.';
     renderListHistory();
   } else if (state.activeTab === 'foto') {
-    els.panelKicker.textContent = 'Foto Nota';
-    els.panelTitle.textContent = 'Semua foto terhubung dengan transaksi';
-    els.panelInfo.textContent = 'Menampilkan daftar foto yang berhasil dipetakan ke data transaksi.';
+    if (els.panelKicker) els.panelKicker.textContent = 'Foto Nota';
+    if (els.panelTitle) els.panelTitle.textContent = 'Semua foto terhubung dengan transaksi';
+    if (els.panelInfo) els.panelInfo.textContent = 'Menampilkan daftar foto yang berhasil dipetakan ke data transaksi.';
     renderFotoNota();
   } else if (state.activeTab === 'foto-belum') {
-    els.panelKicker.textContent = 'Foto Belum Terhubung';
-    els.panelTitle.textContent = 'Foto tanpa transaksi';
-    els.panelInfo.textContent = 'Menampilkan daftar foto yang belum berhasil dipetakan ke transaksi mana pun.';
+    if (els.panelKicker) els.panelKicker.textContent = 'Foto Belum Terhubung';
+    if (els.panelTitle) els.panelTitle.textContent = 'Foto tanpa transaksi';
+    if (els.panelInfo) els.panelInfo.textContent = 'Menampilkan daftar foto yang belum berhasil dipetakan ke transaksi mana pun.';
     renderFotoBelumTerhubung();
   } else if (state.activeTab === 'mentah') {
-    els.panelKicker.textContent = 'Data mentah';
-    els.panelTitle.textContent = 'Data chat mentah';
-    els.panelInfo.textContent = `${state.rawMessages.length} pesan terbaca dari export HTML.`;
+    if (els.panelKicker) els.panelKicker.textContent = 'Data mentah';
+    if (els.panelTitle) els.panelTitle.textContent = 'Data chat mentah';
+    if (els.panelInfo) els.panelInfo.textContent = `${state.rawMessages.length} pesan terbaca dari export HTML.`;
     renderRawMessages();
   } else {
-    els.panelKicker.textContent = 'Master Keyword';
-    els.panelTitle.textContent = 'Aturan klasifikasi kategori';
-    els.panelInfo.textContent = 'Keyword bisa dijadikan acuan untuk pengembangan database master.';
+    if (els.panelKicker) els.panelKicker.textContent = 'Master Keyword';
+    if (els.panelTitle) els.panelTitle.textContent = 'Aturan klasifikasi kategori';
+    if (els.panelInfo) els.panelInfo.textContent = 'Keyword bisa dijadikan acuan untuk pengembangan database master.';
     renderKeywordRules();
   }
 }
@@ -1284,9 +1328,8 @@ async function handleMutationChange(event) {
 
   const validPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
   if (!validPdf) {
-    els.mutationFileHint.textContent = 'File mutasi harus dalam format PDF.';
-    els.pdfReadStatus.textContent = 'File bukan PDF';
-    els.mutationParseStatus.textContent = 'Gagal';
+    if (els.pdfReadStatus) els.pdfReadStatus.textContent = 'File bukan PDF';
+    if (els.mutationParseStatus) els.mutationParseStatus.textContent = 'Gagal';
     return;
   }
 
@@ -1297,10 +1340,9 @@ async function handleMutationChange(event) {
   state.unmatchedTransactions = [];
 
   state.mutationFileName = file.name;
-  els.mutationFileName.textContent = file.name;
-  els.mutationFileHint.style.display = 'none';
-  els.pdfReadStatus.textContent = 'Membaca PDF...';
-  els.mutationParseStatus.textContent = 'Menunggu hasil pembacaan...';
+  if (els.mutationFileName) els.mutationFileName.textContent = file.name;
+  if (els.pdfReadStatus) els.pdfReadStatus.textContent = 'Membaca PDF...';
+  if (els.mutationParseStatus) els.mutationParseStatus.textContent = 'Menunggu hasil pembacaan...';
   
   if (els.mutationOcrProgress) {
     els.mutationOcrProgress.style.display = 'none';
@@ -1326,7 +1368,7 @@ async function handleMutationChange(event) {
     let reconstructedLines = [];
     
     for (let i = 1; i <= pdf.numPages; i++) {
-      els.pdfReadStatus.textContent = `Membaca halaman ${i} dari ${pdf.numPages}`;
+      if (els.pdfReadStatus) els.pdfReadStatus.textContent = `Membaca halaman ${i} dari ${pdf.numPages}`;
       await new Promise(resolve => setTimeout(resolve, 0)); // yield
       
       const page = await pdf.getPage(i);
@@ -1341,22 +1383,22 @@ async function handleMutationChange(event) {
     }
 
     if (fullText.trim().length > 200) {
-      els.pdfReadStatus.textContent = `PDF Digital Terbaca • ${pdf.numPages} halaman`;
-      els.mutationParseStatus.textContent = 'Memisahkan transaksi BCA...';
+      if (els.pdfReadStatus) els.pdfReadStatus.textContent = `PDF Digital Terbaca • ${pdf.numPages} halaman`;
+      if (els.mutationParseStatus) els.mutationParseStatus.textContent = 'Memisahkan transaksi BCA...';
       await new Promise(resolve => setTimeout(resolve, 0)); // yield
       
       // Parse BCA format
       parseBCAMutationLines(reconstructedLines);
       
       if (state.mutations.length > 0) {
-        els.mutationParseStatus.textContent = `${state.mutations.filter(m => m.nominal_keluar > 0).length} transaksi keluar berhasil diparse`;
+        if (els.mutationParseStatus) els.mutationParseStatus.textContent = `${state.mutations.filter(m => m.nominal_keluar > 0).length} transaksi keluar berhasil diparse`;
       } else {
-        els.mutationParseStatus.textContent = 'Teks PDF terbaca, tetapi transaksi belum berhasil diparse';
+        if (els.mutationParseStatus) els.mutationParseStatus.textContent = 'Teks PDF terbaca, tetapi transaksi belum berhasil diparse';
         if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
       }
     } else {
-      els.pdfReadStatus.textContent = 'PDF Tidak Memiliki Text Layer';
-      els.mutationParseStatus.textContent = 'OCR Diperlukan';
+      if (els.pdfReadStatus) els.pdfReadStatus.textContent = 'PDF Tidak Memiliki Text Layer';
+      if (els.mutationParseStatus) els.mutationParseStatus.textContent = 'OCR Diperlukan';
       if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
     }
     
@@ -1364,8 +1406,8 @@ async function handleMutationChange(event) {
     render();
   } catch (error) {
     console.error("Gagal membaca PDF mutasi:", error);
-    els.pdfReadStatus.textContent = 'Gagal Membuka PDF';
-    els.mutationParseStatus.textContent = error?.message || 'Terjadi kesalahan saat memproses PDF';
+    if (els.pdfReadStatus) els.pdfReadStatus.textContent = 'Gagal Membuka PDF';
+    if (els.mutationParseStatus) els.mutationParseStatus.textContent = error?.message || 'Terjadi kesalahan saat memproses PDF';
     if (els.mutationFallbackActions) els.mutationFallbackActions.style.display = 'flex';
     
     state.mutations = [];
@@ -1525,31 +1567,26 @@ function processBCABlock(blockLines, parsedArray, currentId) {
 }
 
 async function handleOcrCloudClick() {
-  els.mutationFileHint.textContent = 'Mencoba OCR Cloud...';
-  const file = els.mutationInput.files?.[0];
+  const file = els.mutationInput?.files?.[0];
   if (!file) return;
   
   try {
     await parseMutationWithCloudOcr(file);
   } catch (error) {
-    els.mutationFileHint.textContent = 'OCR cloud belum aktif. Gunakan Paste Mutasi Manual atau upload PDF digital.';
+    console.warn('OCR cloud not available:', error);
   }
 }
 
 async function handleManualPasteParse() {
-  const text = els.manualPasteInput.value;
-  if (!text.trim()) return;
+  const text = els.manualPasteInput?.value;
+  if (!text?.trim()) return;
   
-  els.manualPasteCard.style.display = 'none';
-  els.mutationFileHint.textContent = 'Memproses teks mutasi manual...';
+  if (els.manualPasteCard) els.manualPasteCard.style.display = 'none';
   
   await parseMutationText(text, 'manual_paste');
   if (state.mutations.length > 0) {
-    els.mutationFileHint.textContent = `${state.mutations.length} data mutasi dari paste manual ditemukan.`;
     reconcileTransactions();
     render();
-  } else {
-    els.mutationFileHint.textContent = 'Gagal memparse mutasi dari teks manual.';
   }
 }
 
