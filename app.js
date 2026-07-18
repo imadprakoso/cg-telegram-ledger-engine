@@ -1,6 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist';
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 import Tesseract from 'tesseract.js';
+import JSZip from 'jszip';
 
 const state = {
   fileName: '',
@@ -10,6 +11,8 @@ const state = {
   transactions: [],
   filteredTransactions: [],
   photoIndex: new Map(),
+  photos: new Map(), // Added for Blob URLs mapping
+  unmatchedPhotos: [], // Added for unmatched photos
   activeTab: 'transaksi',
   filters: {
     search: '',
@@ -160,16 +163,41 @@ async function handleFileChange(event) {
   state.fileName = file.name;
   els.fileName.textContent = file.name;
   els.fileHint.textContent = 'Membaca dan memproses file Telegram...';
+  
+  state.photos.clear();
+  state.unmatchedPhotos = [];
 
   try {
-    const html = await file.text();
+    let html = '';
+    if (file.name.toLowerCase().endsWith('.zip')) {
+      els.fileHint.textContent = 'Mengekstrak ZIP Telegram Export...';
+      const zip = await JSZip.loadAsync(file);
+      
+      const htmlFile = Object.values(zip.files).find(f => f.name.endsWith('messages.html'));
+      if (!htmlFile) throw new Error("Tidak menemukan messages.html di dalam ZIP.");
+      html = await htmlFile.async('text');
+
+      const photoFiles = Object.values(zip.files).filter(f => !f.dir && f.name.includes('photos/'));
+      for (const photoFile of photoFiles) {
+        const blob = await photoFile.async('blob');
+        const url = URL.createObjectURL(blob);
+        // store by relative path like "photos/photo_1.jpg"
+        const pathMatch = photoFile.name.match(/(photos\/.*)$/i);
+        const relativePath = pathMatch ? pathMatch[1] : photoFile.name;
+        state.photos.set(relativePath, url);
+      }
+    } else {
+      html = await file.text();
+    }
+
+    els.fileHint.textContent = 'Memparsing HTML chat Telegram...';
     parseTelegramHtml(html);
-    els.fileHint.textContent = `${state.transactions.length} transaksi final ditemukan dari ${state.listHistory.length} riwayat List TF.`;
+    els.fileHint.textContent = `${state.transactions.length} transaksi final ditemukan dari ${state.listHistory.length} riwayat List TF. ${state.photos.size ? `(${state.photos.size} foto ter-load)` : '(Tanpa foto)'}`;
     els.exportBtn.disabled = state.transactions.length === 0;
     render();
   } catch (error) {
     console.error(error);
-    els.fileHint.textContent = 'Gagal membaca file. Pastikan file adalah messages.html hasil export Telegram.';
+    els.fileHint.textContent = 'Gagal membaca file. Pastikan file adalah messages.html atau ZIP hasil export Telegram.';
   }
 }
 
@@ -223,6 +251,8 @@ function parseTelegramHtml(html) {
   state.listHistory = buildListHistory(rawMessages);
   state.finalLists = pickFinalLists(state.listHistory);
   state.transactions = buildFinalTransactions(state.finalLists, state.photoIndex);
+  
+  mapPhotosToTransactions(rawMessages);
   hydrateFilters();
 
   console.log({
@@ -230,8 +260,71 @@ function parseTelegramHtml(html) {
     listMessagesCount: state.listHistory.length,
     finalListsCount: state.finalLists.length,
     firstListTextSample: state.listHistory[0] ? state.listHistory[0].text.substring(0, 100) : null,
-    parsedTransactionsCount: state.transactions.length,
     firstParsedTransaction: state.transactions[0]
+  });
+}
+
+function mapPhotosToTransactions(rawMessages) {
+  // Extract all photos from messages
+  const allPhotos = [];
+  rawMessages.forEach(msg => {
+    if (msg.photoLinks && msg.photoLinks.length > 0) {
+      msg.photoLinks.forEach(href => {
+        allPhotos.push({
+          href,
+          messageId: msg.id,
+          date: msg.dateLabel,
+          timestampMs: msg.timestampMs,
+          text: msg.text,
+          blobUrl: state.photos.get(href) || null
+        });
+      });
+    }
+  });
+
+  // Collect all already linked photos
+  const linkedHrefs = new Set();
+  state.transactions.forEach(tx => {
+    tx.linkFoto.forEach(p => linkedHrefs.add(p.href));
+  });
+
+  // Photos that need to be matched heuristics
+  const remainingPhotos = allPhotos.filter(p => !linkedHrefs.has(p.href));
+  
+  remainingPhotos.forEach(photo => {
+    // Basic heuristic: match by OT code first if available in photo text
+    const otCodes = extractOtCodes(photo.text);
+    let matchedTx = null;
+    
+    if (otCodes.length > 0) {
+      matchedTx = state.transactions.find(tx => tx.kodeOT.includes(otCodes[0]));
+    }
+    
+    // If still no match, match by closest timestamp where Vendor matches or just closest time
+    if (!matchedTx && photo.text) {
+      const lowerText = photo.text.toLowerCase();
+      const possibleTxs = state.transactions.filter(tx => {
+        const v = tx.vendor.toLowerCase();
+        const r = (tx.noRekening || '').toLowerCase();
+        return (v && v !== 'perlu dicek' && lowerText.includes(v)) || (r && lowerText.includes(r));
+      });
+      if (possibleTxs.length > 0) {
+        // Find closest by time
+        matchedTx = possibleTxs.reduce((prev, curr) => {
+          return (Math.abs(curr.timestampMs - photo.timestampMs) < Math.abs(prev.timestampMs - photo.timestampMs)) ? curr : prev;
+        });
+      }
+    }
+    
+    if (matchedTx) {
+      matchedTx.linkFoto.push(photo);
+      matchedTx.photoCount = matchedTx.linkFoto.length;
+      matchedTx.statusNota = 'Ada';
+      if (photo.blobUrl) matchedTx.statusOCR = 'Tersedia untuk OCR';
+      linkedHrefs.add(photo.href);
+    } else {
+      state.unmatchedPhotos.push(photo);
+    }
   });
 }
 
@@ -426,10 +519,24 @@ function attachEvidenceAndValidation(tx, photoIndex) {
     const photos = photoIndex.get(code) || [];
     linkedPhotos.push(...photos);
   });
-  const uniquePhotos = uniqueBy(linkedPhotos, (item) => item.href);
+  const uniquePhotos = uniqueBy(linkedPhotos, (item) => item.href).map(p => ({
+    ...p,
+    blobUrl: state.photos.get(p.href) || null
+  }));
+  
   tx.linkFoto = uniquePhotos;
+  tx.photoCount = uniquePhotos.length;
   tx.statusNota = uniquePhotos.length ? 'Ada' : 'Kurang Nota';
-  tx.statusOCR = uniquePhotos.length ? 'Foto Terindeks' : 'Foto Tidak Tersedia';
+  
+  if (!uniquePhotos.length) {
+    tx.statusOCR = 'Foto Tidak Tersedia';
+  } else if (uniquePhotos.some(p => p.blobUrl)) {
+    tx.statusOCR = 'Tersedia untuk OCR';
+  } else {
+    tx.statusOCR = 'Hanya HTML (Tanpa Gambar)';
+  }
+  
+  tx.ocr_text = '';
 
   const lowerRaw = `${tx.teksMentah} ${tx.deskripsi}`.toLowerCase();
   if (tx.kategori === 'Outsourcing') {
@@ -447,7 +554,7 @@ function attachEvidenceAndValidation(tx, photoIndex) {
   if (!tx.vendor || tx.vendor === 'Perlu Dicek') notes.push('Vendor/rekening perlu dicek');
   if (!tx.kodeCG.length) notes.push('Kode CG tidak ditemukan');
   if (tx.kategori === 'Perlu Dicek') notes.push('Kategori belum yakin');
-  if (tx.statusNota === 'Kurang Nota') notes.push('Foto nota belum terhubung dari HTML');
+  if (tx.statusNota === 'Kurang Nota') notes.push('Foto nota belum terhubung');
   if (tx.statusInvoice === 'Kurang Invoice') notes.push('Invoice wajib untuk Outsourcing');
   if (tx.isFallback) notes.push('Fallback: list terbaru gagal diparse, memakai list valid sebelumnya.');
 
@@ -620,6 +727,16 @@ function renderPanel() {
     els.panelTitle.textContent = 'Riwayat list Telegram';
     els.panelInfo.textContent = 'List terbaru per tanggal ditandai sebagai Final.';
     renderListHistory();
+  } else if (state.activeTab === 'foto') {
+    els.panelKicker.textContent = 'Foto Nota';
+    els.panelTitle.textContent = 'Semua foto terhubung dengan transaksi';
+    els.panelInfo.textContent = 'Menampilkan daftar foto yang berhasil dipetakan ke data transaksi.';
+    renderFotoNota();
+  } else if (state.activeTab === 'foto-belum') {
+    els.panelKicker.textContent = 'Foto Belum Terhubung';
+    els.panelTitle.textContent = 'Foto tanpa transaksi';
+    els.panelInfo.textContent = 'Menampilkan daftar foto yang belum berhasil dipetakan ke transaksi mana pun.';
+    renderFotoBelumTerhubung();
   } else if (state.activeTab === 'mentah') {
     els.panelKicker.textContent = 'Data mentah';
     els.panelTitle.textContent = 'Data chat mentah';
@@ -651,6 +768,7 @@ function renderTransactionTable() {
             <th>Deskripsi & Kode CG</th>
             <th style="width: 160px;">Kategori</th>
             <th style="width: 160px;">Status Validasi</th>
+            <th style="width: 200px;">Foto & OCR</th>
           </tr>
         </thead>
         <tbody>
@@ -661,9 +779,46 @@ function renderTransactionTable() {
   `;
 }
 
+window.runOcr = async function(txId) {
+  const tx = state.transactions.find(t => t.id === txId);
+  if (!tx || !tx.linkFoto || !tx.linkFoto.length) return;
+  const photo = tx.linkFoto.find(p => p.blobUrl);
+  if (!photo) return;
+  
+  tx.ocr_status = 'Memproses OCR...';
+  render(); // Trigger re-render to show processing status
+
+  try {
+    const worker = await Tesseract.createWorker('ind');
+    const ret = await worker.recognize(photo.blobUrl);
+    tx.ocr_text = ret.data.text;
+    tx.ocr_status = 'Berhasil';
+    await worker.terminate();
+  } catch (err) {
+    console.error(err);
+    tx.ocr_status = 'OCR Perlu Dicek';
+  }
+  
+  render();
+};
+
 function renderTransactionRow(tx) {
   const codes = tx.kodeCG.length ? tx.kodeCG : ['Kode CG tidak ada'];
   const ot = tx.kodeOT.length ? `<div class="chip-wrap">${tx.kodeOT.map((code) => `<span class="code-chip">${escapeHtml(code)}</span>`).join('')}</div>` : '';
+  
+  let ocrSection = '';
+  if (tx.photoCount > 0) {
+    const hasBlob = tx.linkFoto.some(p => p.blobUrl);
+    ocrSection = `
+      <div class="cell-sub" style="margin-bottom: 4px;">${tx.photoCount} Foto Tersedia</div>
+      ${hasBlob ? `<button onclick="runOcr('${tx.id}')" style="padding: 4px 8px; font-size: 11px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; background: #f9fafb;">Jalankan OCR</button>` : ''}
+      <div class="cell-sub" style="margin-top: 4px; color: ${tx.ocr_status === 'Berhasil' ? 'green' : (tx.ocr_status === 'OCR Perlu Dicek' ? 'red' : '#666')}">${tx.ocr_status || tx.statusOCR}</div>
+      ${tx.ocr_text ? `<details><summary style="font-size: 11px; cursor: pointer;">Teks OCR</summary><div style="font-size: 11px; padding: 4px; background: #eee; border-radius: 4px; max-height: 100px; overflow-y: auto;">${escapeHtml(tx.ocr_text)}</div></details>` : ''}
+    `;
+  } else {
+    ocrSection = `<div class="cell-sub" style="color: #999;">Tidak Ada Foto</div>`;
+  }
+
   return `
     <tr>
       <td>
@@ -686,6 +841,7 @@ function renderTransactionRow(tx) {
       </td>
       <td>${categoryBadge(tx.kategori)}</td>
       <td>${validationBadge(tx.statusValidasi)}${tx.catatanSistem ? `<div class="cell-sub">${escapeHtml(tx.catatanSistem)}</div>` : ''}</td>
+      <td>${ocrSection}</td>
     </tr>
   `;
 }
@@ -715,6 +871,63 @@ function renderListHistory() {
       </table>
     </div>
   `;
+}
+
+function renderFotoNota() {
+  const linkedTxs = state.transactions.filter(tx => tx.linkFoto.length > 0);
+  if (!linkedTxs.length) {
+    els.tableHost.innerHTML = emptyState('Belum ada foto', 'Upload ZIP Telegram yang berisi folder photos.');
+    return;
+  }
+
+  const html = `
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px;">
+      ${linkedTxs.map(tx => `
+        <div style="border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #fff; display: flex; flex-direction: column;">
+          ${tx.linkFoto.some(p => p.blobUrl) 
+            ? `<img src="${tx.linkFoto.find(p => p.blobUrl)?.blobUrl}" style="width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #e5e7eb;" />` 
+            : `<div style="width: 100%; height: 180px; display: flex; align-items: center; justify-content: center; background: #f3f4f6; color: #9ca3af; border-bottom: 1px solid #e5e7eb;">HTML Saja (Tanpa Foto)</div>`
+          }
+          <div style="padding: 12px; flex: 1;">
+            <div style="font-weight: 600; font-size: 14px; margin-bottom: 4px;">${escapeHtml(tx.vendor)}</div>
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 8px;">${escapeHtml(tx.tanggalLabel)} • ${formatRupiah(tx.nominal)}</div>
+            <div style="font-size: 11px; background: #f3f4f6; padding: 6px; border-radius: 4px;">
+              ${escapeHtml(shorten(tx.deskripsi, 60))}
+            </div>
+            ${tx.ocr_text ? `<div style="margin-top: 8px; font-size: 11px; color: #059669; font-weight: 500;">✓ OCR Tersedia</div>` : ''}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  els.tableHost.innerHTML = html;
+}
+
+function renderFotoBelumTerhubung() {
+  if (!state.unmatchedPhotos.length) {
+    els.tableHost.innerHTML = emptyState('Tidak ada foto tersisa', 'Semua foto telah berhasil dipetakan ke transaksi, atau tidak ada foto dari upload HTML.');
+    return;
+  }
+
+  const html = `
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 16px;">
+      ${state.unmatchedPhotos.map(photo => `
+        <div style="border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #fff; display: flex; flex-direction: column;">
+          ${photo.blobUrl 
+            ? `<img src="${photo.blobUrl}" style="width: 100%; height: 180px; object-fit: cover; border-bottom: 1px solid #e5e7eb;" />` 
+            : `<div style="width: 100%; height: 180px; display: flex; align-items: center; justify-content: center; background: #f3f4f6; color: #9ca3af; border-bottom: 1px solid #e5e7eb;">HTML Saja (Tanpa Foto)</div>`
+          }
+          <div style="padding: 12px; flex: 1;">
+            <div style="font-size: 12px; color: #6b7280; margin-bottom: 8px;">${escapeHtml(photo.date)}</div>
+            <div style="font-size: 11px; background: #f3f4f6; padding: 6px; border-radius: 4px;">
+              ${escapeHtml(shorten(photo.text, 100)) || '<i>Tanpa teks</i>'}
+            </div>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  els.tableHost.innerHTML = html;
 }
 
 function renderRawMessages() {

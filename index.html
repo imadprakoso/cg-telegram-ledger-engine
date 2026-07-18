@@ -23,6 +23,8 @@
             <button class="tab-pill" data-tab="mutasi">Mutasi Bank</button>
             <button class="tab-pill" data-tab="rekonsiliasi">Rekonsiliasi Mutasi</button>
             <button class="tab-pill" data-tab="riwayat">Riwayat List</button>
+            <button class="tab-pill" data-tab="foto">Foto Nota</button>
+            <button class="tab-pill" data-tab="foto-belum">Foto Belum Terhubung</button>
             <button class="tab-pill" data-tab="mentah">Data Chat Mentah</button>
             <button class="tab-pill" data-tab="keyword">Master Keyword</button>
           </nav>
@@ -46,16 +48,17 @@
             <div class="icon-bubble">⇧</div>
             <div>
               <h2>Upload Data Source</h2>
-              <p>Pilih file <code>messages.html</code> dari hasil export Telegram Desktop. Semua proses berjalan di browser, data tidak dikirim ke server.</p>
+              <p>Pilih file ZIP hasil export Telegram Desktop (atau <code>messages.html</code>). Semua proses berjalan di browser.</p>
+              <p style="margin-top: 8px; font-size: 13px; color: #6b7280; font-weight: 500;">💡 Gunakan ZIP Telegram Export jika ingin sistem membaca foto nota/bukti. Upload HTML saja hanya membaca teks chat.</p>
             </div>
           </div>
 
           <div class="upload-box">
-            <label for="fileInput" class="upload-button">Pilih messages.html</label>
-            <input id="fileInput" type="file" accept=".html,text/html" />
+            <label for="fileInput" class="upload-button">Pilih ZIP / HTML Telegram</label>
+            <input id="fileInput" type="file" accept=".html,text/html,.zip,application/zip" />
             <div class="file-meta">
               <strong id="fileName">Belum ada file Telegram</strong>
-              <span id="fileHint">Sistem otomatis memfilter List TF CG final per tanggal.</span>
+              <span id="fileHint">Upload ZIP lengkap untuk OCR foto otomatis.</span>
             </div>
           </div>
         </section>
